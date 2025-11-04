@@ -1,0 +1,25 @@
+# Environment files with secrets
+.env
+
+# Generated configuration files (auto-generated from templates by deploy.sh)
+Caddyfile
+authelia/configuration.yml
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.backup
+secrets/

@@ -1,0 +1,35 @@
+# Testing Caddyfile - Uses self-signed certificates (no Let's Encrypt rate limits)
+
+# Reusable forward authentication snippet
+(auth) {
+    forward_auth authelia:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+    }
+}
+
+# Authelia - NO forward auth (must be accessible for login)
+${AUTHELIA_SUBDOMAIN}.${BASE_DOMAIN} {
+    tls internal
+    reverse_proxy authelia:9091
+}
+
+# Gitea - Uses OIDC for authentication (no forward_auth)
+${GITEA_SUBDOMAIN}.${BASE_DOMAIN} {
+    tls internal
+    reverse_proxy gitea:3000
+}
+
+# JSPWiki - Protected by Authelia
+${WIKI_SUBDOMAIN}.${BASE_DOMAIN} {
+    tls internal
+    import auth
+    reverse_proxy jspwiki:8080
+}
+
+# lldap - Protected by Authelia (requires Authelia auth + lldap admin password)
+${LLDAP_SUBDOMAIN}.${BASE_DOMAIN} {
+    tls internal
+    import auth
+    reverse_proxy lldap:17170
+}

@@ -1,0 +1,164 @@
+# =============================================================================
+# Organization Stack - Docker Compose Configuration
+# =============================================================================
+# Defines four core services and their dependencies:
+#   1. lldap - Lightweight LDAP directory for user management
+#   2. Authelia - SSO authentication server with 2FA support
+#   3. Gitea - Self-hosted Git service (uses OIDC for authentication)
+#   4. JSPWiki - Wiki platform (uses forward-auth for authentication)
+#   5. Caddy - Reverse proxy with automatic HTTPS
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # lldap - Lightweight LDAP Directory
+  # ===========================================================================
+  # Centralized user and group management
+  # All user credentials are stored here; other services authenticate against it
+  lldap:
+    image: lldap/lldap:stable
+    container_name: lldap
+    ports:
+      - "${LLDAP_LDAP_PORT:-3890}:3890"      # LDAP protocol port
+      - "${LLDAP_HTTP_PORT:-17170}:17170"    # Web admin interface
+    environment:
+      - UID=${USER_UID:-1000}
+      - GID=${USER_GID:-1000}
+      - TZ=${TZ:-UTC}
+      - LLDAP_JWT_SECRET_FILE=/secrets/JWT_SECRET
+      - LLDAP_LDAP_USER_PASS_FILE=/secrets/LDAP_USER_PASS
+      - LLDAP_LDAP_BASE_DN=${LDAP_BASE_DN}
+    volumes:
+      - lldap_data:/data                     # Persistent LDAP database
+      - ./secrets/lldap:/secrets:ro          # Read-only secrets mount
+    networks:
+      - org-network
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Authelia - SSO Authentication & Authorization Server
+  # ===========================================================================
+  # Provides single sign-on, two-factor authentication, and access control
+  # Acts as both OIDC provider (for Gitea) and forward-auth endpoint (for Wiki/lldap)
+  authelia:
+    image: authelia/authelia:latest
+    container_name: authelia
+    ports:
+      - "${AUTHELIA_PORT:-9091}:9091"
+    environment:
+      - TZ=${TZ:-UTC}
+      # All secrets loaded from files for security
+      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/secrets/JWT_SECRET
+      - AUTHELIA_SESSION_SECRET_FILE=/secrets/SESSION_SECRET
+      - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/secrets/STORAGE_ENCRYPTION_KEY
+      - AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE=/secrets/OIDC_HMAC_SECRET
+      - AUTHELIA_IDENTITY_PROVIDERS_OIDC_ISSUER_PRIVATE_KEY_FILE=/secrets/OIDC_PRIVATE_KEY
+      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/secrets-lldap/LDAP_USER_PASS
+    volumes:
+      - ./authelia/configuration.yml:/config/configuration.yml:ro
+      - ./secrets/authelia:/secrets:ro       # Authelia's own secrets
+      - ./secrets/lldap:/secrets-lldap:ro    # lldap password for LDAP auth
+      - authelia_data:/data                  # Sessions, 2FA registrations
+    networks:
+      - org-network
+    restart: unless-stopped
+    depends_on:
+      - lldap
+
+  # ===========================================================================
+  # Gitea - Self-Hosted Git Service
+  # ===========================================================================
+  # Git repository hosting with web UI
+  # Uses OIDC to authenticate users through Authelia (SSO)
+  gitea:
+    image: gitea/gitea:latest
+    container_name: gitea
+    ports:
+      - "${GITEA_HTTP_PORT:-3000}:3000"      # Web interface
+      - "${GITEA_SSH_PORT:-2222}:22"         # Git SSH access
+    environment:
+      - USER_UID=${USER_UID:-1000}
+      - USER_GID=${USER_GID:-1000}
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__server__DOMAIN=${GITEA_SUBDOMAIN}.${BASE_DOMAIN}
+      - GITEA__server__ROOT_URL=https://${GITEA_SUBDOMAIN}.${BASE_DOMAIN}
+      - GITEA__server__SSH_DOMAIN=${GITEA_SUBDOMAIN}.${BASE_DOMAIN}
+      - GITEA__server__SSH_PORT=${GITEA_SSH_PORT:-2222}
+    volumes:
+      - gitea_data:/data                     # Git repos, database, config
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - org-network
+    restart: unless-stopped
+    depends_on:
+      - authelia
+
+  # ===========================================================================
+  # JSPWiki - Wiki Platform
+  # ===========================================================================
+  # Collaborative wiki with LDAP user synchronization
+  # Uses forward-auth (trusts Remote-User header from Authelia via Caddy)
+  jspwiki:
+    build: ./jspwiki                         # Custom image with RemoteUserFilter
+    container_name: jspwiki
+    environment:
+      - LDAP_BASE_DN=${LDAP_BASE_DN}
+    volumes:
+      - jspwiki_data:/var/jspwiki            # Wiki pages and config
+      - ./jspwiki-custom.properties:/usr/local/tomcat/lib/jspwiki-custom.properties:ro
+      - ./jspwiki.policy:/usr/local/tomcat/webapps/ROOT/WEB-INF/jspwiki.policy:ro
+      - ./secrets/lldap:/secrets-lldap:ro    # lldap admin password for sync
+    networks:
+      - org-network
+    restart: unless-stopped
+    depends_on:
+      - lldap
+
+  # ===========================================================================
+  # Caddy - Reverse Proxy with Automatic HTTPS
+  # ===========================================================================
+  # Terminates TLS and routes traffic to backend services
+  # Automatically obtains Let's Encrypt certificates
+  # Enforces authentication via forward-auth for wiki and lldap
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    ports:
+      - "${HTTP_PORT:-80}:80"                # HTTP (redirects to HTTPS)
+      - "${HTTPS_PORT:-443}:443"             # HTTPS
+      - "${HTTPS_PORT:-443}:443/udp"         # HTTP/3 (QUIC)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro  # Generated from template by deploy.sh
+      - caddy_data:/data                     # TLS certificates
+      - caddy_config:/config                 # Caddy runtime config
+    networks:
+      - org-network
+    restart: unless-stopped
+    depends_on:
+      - lldap
+      - authelia
+      - gitea
+      - jspwiki
+
+# =============================================================================
+# Networks
+# =============================================================================
+# All services communicate on an internal bridge network
+# External access is only through Caddy reverse proxy
+networks:
+  org-network:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
+# Persistent storage for all services
+# Back these up regularly with: ./manage.sh backup
+volumes:
+  lldap_data:       # LDAP database (users, groups)
+  authelia_data:    # Authentication state (sessions, 2FA registrations)
+  gitea_data:       # Git repositories and Gitea database
+  jspwiki_data:     # Wiki pages and attachments
+  caddy_data:       # TLS certificates from Let's Encrypt
+  caddy_config:     # Caddy runtime configuration

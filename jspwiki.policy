@@ -1,0 +1,36 @@
+// JSPWiki security policy - closed wiki with Admin group
+// Regular authenticated users can view, edit, comment, and create pages
+// Only Admin group members can delete pages and manage groups
+
+// All users can login and manage their own profile
+grant principal org.apache.wiki.auth.authorize.Role "All" {
+    permission org.apache.wiki.auth.permissions.WikiPermission "*", "login";
+    permission org.apache.wiki.auth.permissions.WikiPermission "*", "editPreferences";
+    permission org.apache.wiki.auth.permissions.WikiPermission "*", "editProfile";
+};
+
+// Authenticated users: standard privileges
+grant principal org.apache.wiki.auth.authorize.Role "Authenticated" {
+    // View all pages
+    permission org.apache.wiki.auth.permissions.PagePermission "*:*", "view";
+
+    // Modify pages (edit + upload)
+    permission org.apache.wiki.auth.permissions.PagePermission "*:*", "modify";
+
+    // Comment on pages
+    permission org.apache.wiki.auth.permissions.PagePermission "*:*", "comment";
+
+    // Rename pages
+    permission org.apache.wiki.auth.permissions.PagePermission "*:*", "rename";
+
+    // Create new pages
+    permission org.apache.wiki.auth.permissions.WikiPermission "*", "createPages";
+
+    // View groups (but NOT edit them)
+    permission org.apache.wiki.auth.permissions.GroupPermission "*:*", "view";
+};
+
+// Admin group: full administrative privileges
+grant principal org.apache.wiki.auth.GroupPrincipal "Admin" {
+    permission org.apache.wiki.auth.permissions.AllPermission "*";
+};
