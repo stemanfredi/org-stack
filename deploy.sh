@@ -165,7 +165,7 @@ export AUTH_POLICY
 log "Generating configuration files..."
 
 # Export all variables for envsubst
-export BASE_DOMAIN GITEA_SUBDOMAIN WIKI_SUBDOMAIN AUTHELIA_SUBDOMAIN LLDAP_SUBDOMAIN
+export BASE_DOMAIN GITEA_SUBDOMAIN WIKI_SUBDOMAIN AUTHELIA_SUBDOMAIN LLDAP_SUBDOMAIN REGISTRATION_SUBDOMAIN
 export LDAP_BASE_DN LLDAP_LDAP_USER_PASS AUTH_POLICY
 export SESSION_EXPIRATION SESSION_INACTIVITY SESSION_REMEMBER_ME
 export MAX_RETRIES FIND_TIME BAN_TIME
@@ -209,10 +209,11 @@ fi
 echo
 
 echo "Domain access (via Caddy reverse proxy):"
-echo "  • Gitea:    https://${GITEA_SUBDOMAIN}.${BASE_DOMAIN}"
-echo "  • Wiki:     https://${WIKI_SUBDOMAIN}.${BASE_DOMAIN}"
-echo "  • Authelia: https://${AUTHELIA_SUBDOMAIN}.${BASE_DOMAIN}"
-echo "  • lldap:    https://${LLDAP_SUBDOMAIN}.${BASE_DOMAIN}"
+echo "  • Gitea:        https://${GITEA_SUBDOMAIN}.${BASE_DOMAIN}"
+echo "  • Wiki:         https://${WIKI_SUBDOMAIN}.${BASE_DOMAIN}"
+echo "  • Authelia:     https://${AUTHELIA_SUBDOMAIN}.${BASE_DOMAIN}"
+echo "  • lldap:        https://${LLDAP_SUBDOMAIN}.${BASE_DOMAIN}"
+echo "  • Registration: https://${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN}"
 echo
 echo "Direct port access (from server or via port forwarding):"
 echo "  • Gitea:    http://localhost:${GITEA_HTTP_PORT}"

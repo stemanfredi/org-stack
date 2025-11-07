@@ -1,12 +1,13 @@
 # =============================================================================
 # Organization Stack - Docker Compose Configuration
 # =============================================================================
-# Defines four core services and their dependencies:
+# Defines six core services and their dependencies:
 #   1. lldap - Lightweight LDAP directory for user management
 #   2. Authelia - SSO authentication server with 2FA support
 #   3. Gitea - Self-hosted Git service (uses OIDC for authentication)
 #   4. JSPWiki - Wiki platform (uses forward-auth for authentication)
-#   5. Caddy - Reverse proxy with automatic HTTPS
+#   5. Registration - User self-provisioning service (forward-auth for admin)
+#   6. Caddy - Reverse proxy with automatic HTTPS
 # =============================================================================
 
 services:
@@ -84,8 +85,14 @@ services:
       - GITEA__server__ROOT_URL=https://${GITEA_SUBDOMAIN}.${BASE_DOMAIN}
       - GITEA__server__SSH_DOMAIN=${GITEA_SUBDOMAIN}.${BASE_DOMAIN}
       - GITEA__server__SSH_PORT=${GITEA_SSH_PORT:-2222}
+      - GITEA__oauth2_client__ACCOUNT_LINKING=auto
+      - GITEA__oauth2_client__ENABLE_AUTO_REGISTRATION=true
+      - GITEA__openid__ENABLE_OPENID_SIGNIN=false
+      # Trust Caddy's self-signed CA when USE_SELF_SIGNED_CERTS=true
+      - SSL_CERT_FILE=/data/ca-bundle.crt
     volumes:
       - gitea_data:/data                     # Git repos, database, config
+      - caddy_data:/caddy_data:ro            # Access Caddy's self-signed CA
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
     networks:
@@ -116,6 +123,40 @@ services:
       - lldap
 
   # ===========================================================================
+  # Registration - User Self-Provisioning Service
+  # ===========================================================================
+  # Public registration form and admin approval dashboard
+  # Public route: / (registration form)
+  # Protected route: /admin (requires forward-auth via Authelia)
+  # Creates approved users in lldap via GraphQL API
+  registration:
+    build: ./registration                    # FastAPI application
+    container_name: registration
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
+    environment:
+      - DATABASE_PATH=/data/registrations.db
+      - LLDAP_URL=http://lldap:17170
+      - LLDAP_ADMIN_USER=admin
+      - LDAP_BASE_DN=${LDAP_BASE_DN}
+      - ADMIN_EMAIL=${REGISTRATION_ADMIN_EMAIL:-}
+      - SMTP_ENABLED=${SMTP_ENABLED:-false}
+      - SMTP_HOST=${SMTP_HOST:-localhost}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+    volumes:
+      - registration_data:/data              # SQLite database and audit log
+      - ./secrets/lldap:/secrets-lldap:ro    # lldap admin password for user creation
+    networks:
+      - org-network
+    restart: unless-stopped
+    depends_on:
+      - lldap
+      - authelia
+
+  # ===========================================================================
   # Caddy - Reverse Proxy with Automatic HTTPS
   # ===========================================================================
   # Terminates TLS and routes traffic to backend services
@@ -140,6 +181,7 @@ services:
       - authelia
       - gitea
       - jspwiki
+      - registration
 
 # =============================================================================
 # Networks
@@ -156,9 +198,10 @@ networks:
 # Persistent storage for all services
 # Back these up regularly with: ./manage.sh backup
 volumes:
-  lldap_data:       # LDAP database (users, groups)
-  authelia_data:    # Authentication state (sessions, 2FA registrations)
-  gitea_data:       # Git repositories and Gitea database
-  jspwiki_data:     # Wiki pages and attachments
-  caddy_data:       # TLS certificates from Let's Encrypt
-  caddy_config:     # Caddy runtime configuration
+  lldap_data:         # LDAP database (users, groups)
+  authelia_data:      # Authentication state (sessions, 2FA registrations)
+  gitea_data:         # Git repositories and Gitea database
+  jspwiki_data:       # Wiki pages and attachments
+  registration_data:  # Registration requests and audit log
+  caddy_data:         # TLS certificates from Let's Encrypt
+  caddy_config:       # Caddy runtime configuration

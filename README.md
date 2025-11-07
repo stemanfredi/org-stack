@@ -12,16 +12,17 @@ This project provides a complete, production-ready stack for small to medium org
 - **[Authelia](https://www.authelia.com/)** - SSO authentication server with 2FA/TOTP support, OIDC provider, and forward-auth endpoint
 - **[Gitea](https://gitea.io/)** - Self-hosted Git service with web UI (authenticated via OIDC)
 - **[JSPWiki](https://jspwiki.apache.org/)** - Collaborative wiki platform (authenticated via Forward-Auth)
+- **Registration Service** - User self-provisioning with admin approval (FastAPI + SQLite)
 - **[Caddy](https://caddyserver.com/)** - Reverse proxy with automatic HTTPS via Let's Encrypt
 
 ### Key Features
 
-✅ **Single Sign-On (SSO)** - One set of credentials for all services
-✅ **Two-Factor Authentication** - TOTP (Google Authenticator, Authy, etc.) support
-✅ **Automatic HTTPS** - Let's Encrypt certificates managed by Caddy
-✅ **File-Based Secrets** - Secure secret management following Docker best practices
-✅ **One-Command Deployment** - Automated setup script handles everything
-✅ **Zero Manual Configuration** - Template-based config generation from `.env`
+- **Single Sign-On (SSO)** - One set of credentials for all services
+- **Two-Factor Authentication** - TOTP (Google Authenticator, Authy, etc.) support
+- **Automatic HTTPS** - Let's Encrypt certificates managed by Caddy
+- **File-Based Secrets** - Secure secret management following Docker best practices
+- **One-Command Deployment** - Automated setup script handles everything
+- **Zero Manual Configuration** - Template-based config generation from `.env`
 
 ## Quick Start
 
@@ -66,6 +67,7 @@ This project provides a complete, production-ready stack for small to medium org
    - **Authelia**: https://auth.yourdomain.com
    - **Gitea**: https://git.yourdomain.com
    - **Wiki**: https://wiki.yourdomain.com
+   - **Registration**: https://register.yourdomain.com (public user registration)
 
 ### First-Time Setup
 
@@ -93,6 +95,13 @@ After deployment, complete these steps:
    - You'll be redirected to Authelia for login
    - After authentication, you'll have admin access if you're in the `lldap_admin` group
 
+4. **Enable user self-registration (optional)**
+   - Access https://register.yourdomain.com/admin (requires Authelia login)
+   - Users can register at https://register.yourdomain.com
+   - Admins approve/reject requests from the admin dashboard
+   - Approved users are automatically created in lldap with random passwords
+   - Users receive email notifications (if SMTP is configured in .env)
+
 ## Architecture
 
 ```
@@ -103,7 +112,7 @@ After deployment, complete these steps:
                      ┌─────────▼──────────┐
                      │   Caddy (HTTPS)    │ ← Automatic Let's Encrypt
                      │  Reverse Proxy     │
-                     └──────────┬──────────┘
+                     └──────────┬─────────┘
                                 │
             ┌───────────────────┼───────────────────┐
             │                   │                   │
@@ -111,13 +120,13 @@ After deployment, complete these steps:
     │  Gitea (Git)   │  │ JSPWiki (Wiki)│  │  lldap (Admin)│
     │   via OIDC ────┼──┤ via Fwd-Auth ─┼──┤ via Fwd-Auth ─┼──┐
     └────────────────┘  └───────────────┘  └───────────────┘  │
-                                                               │
-                         ┌─────────────────────────────────────┘
+                                                              │
+                         ┌────────────────────────────────────┘
                          │
                 ┌────────▼─────────┐
                 │     Authelia     │ ← SSO/2FA/OIDC/Forward-Auth
                 │  (Auth Server)   │
-                └────────┬──────────┘
+                └────────┬─────────┘
                          │
                 ┌────────▼─────────┐
                 │      lldap       │ ← User Database (LDAP)
@@ -241,8 +250,8 @@ This project demonstrates integration of several authentication protocols:
 
 ### Forward-Auth
 - **Implementation**: Authelia (endpoint), Caddy (proxy)
-- **Pattern**: [Traefik Forward-Auth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/)
 - **Used for**: Wiki and lldap authentication via trusted headers
+- **How it works**: Proxy delegates authentication to external service before forwarding requests
 - **Resources**:
   - [Authelia Forward-Auth Docs](https://www.authelia.com/integration/proxies/fowarded-headers/)
   - [Caddy forward_auth Directive](https://caddyserver.com/docs/caddyfile/directives/forward_auth)

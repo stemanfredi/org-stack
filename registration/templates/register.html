@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}Register - User Registration{% endblock %}
+
+{% block content %}
+<h1>Request Account</h1>
+
+{% if success %}
+<div class="alert alert-success">{{ success }}</div>
+{% endif %}
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<div style="max-width: 600px;">
+    <div class="alert alert-info" style="background: var(--info-bg); color: #084298; border: 1px solid #b6d4fe; margin-bottom: 1.5rem;">
+        <strong>Note:</strong> Your password will be automatically generated and sent to you via email upon approval.
+        You can change it after your first login.
+    </div>
+
+    <form method="post">
+        <div class="form-group">
+            <label for="username">Username <span class="required">*</span></label>
+            <input type="text" id="username" name="username" required pattern="[a-z0-9_]+"
+                   title="Only lowercase letters, numbers, and underscores allowed"
+                   style="text-transform: lowercase;"
+                   oninput="this.value = this.value.toLowerCase()">
+            <div class="help-text">Only lowercase letters, numbers, and underscores.</div>
+        </div>
+
+        <div class="form-group">
+            <label for="email">Email <span class="required">*</span></label>
+            <input type="email" id="email" name="email" required>
+            <div class="help-text">Your temporary password will be sent to this address upon approval.</div>
+        </div>
+
+        <div class="form-group">
+            <label for="first_name">First Name <span class="required">*</span></label>
+            <input type="text" id="first_name" name="first_name" required>
+        </div>
+
+        <div class="form-group">
+            <label for="last_name">Last Name <span class="required">*</span></label>
+            <input type="text" id="last_name" name="last_name" required>
+        </div>
+
+        <div class="form-group">
+            <label for="reason">Reason for Access (Optional)</label>
+            <textarea id="reason" name="reason" placeholder="Why do you need an account?"></textarea>
+            <div class="help-text">Optional: Help administrators understand your request.</div>
+        </div>
+
+        <button type="submit" class="btn-primary">Submit Request</button>
+    </form>
+</div>
+{% endblock %}

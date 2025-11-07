@@ -18,11 +18,11 @@ This document provides a detailed technical explanation of how the Organization 
 ## System Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          Internet / Users                                 │
-│                                                                            │
-│  https://git.example.com   https://wiki.example.com   https://ldap.example.com
-└──────────────────────────────────┬───────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                          Internet / Users                                              │
+│                                                                                        │
+│  https://git.example.com   https://wiki.example.com   https://register.example.com     │
+└──────────────────────────────────┬─────────────────────────────────────────────────────┘
                                    │
                                    │ HTTPS (TLS 1.2+)
                                    ▼
@@ -34,38 +34,38 @@ This document provides a detailed technical explanation of how the Organization 
                          │   - HTTP Routing    │
                          └──────────┬──────────┘
                                     │
-          ┌─────────────────────────┼─────────────────────────┐
-          │                         │                         │
-          │ OIDC                    │ Forward-Auth            │ Forward-Auth
-          ▼                         ▼                         ▼
-┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
-│   Gitea         │       │   JSPWiki       │       │   lldap (Web)   │
-│                 │       │                 │       │                 │
-│   Port: 3000    │       │   Port: 8080    │       │   Port: 17170   │
-│                 │       │                 │       │                 │
-│   Auth: OIDC    │       │ Auth: Remote-   │       │ Auth: Remote-   │
-│   (OAuth2)      │       │   User Header   │       │   User Header   │
-└────────┬────────┘       └────────┬────────┘       └─────────────────┘
-         │                         │
-         │ OIDC Protocol           │ LDAP Query
-         │                         │ (User Sync)
-         ▼                         ▼
-┌────────────────────────────────────────────┐
-│          Authelia                          │
-│                                            │
-│  - OIDC Provider (/.well-known/...)       │
-│  - Forward-Auth Endpoint (/api/authz/...) │
-│  - Session Management                     │
-│  - 2FA/TOTP Validation                    │
-│  - Access Control Policies                │
-│                                            │
-│  Port: 9091                                │
-└──────────────────┬─────────────────────────┘
-                   │
-                   │ LDAP Protocol
-                   │ (Credential Validation)
-                   ▼
-         ┌──────────────────────┐
+          ┌─────────────────────────┼──────────────────────────┬──────────────────────┐
+          │                         │                          │                      │
+          │ OIDC                    │ Forward-Auth             │ Forward-Auth         │ Public + Forward-Auth
+          ▼                         ▼                          ▼                      ▼
+┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐    ┌─────────────────┐
+│   Gitea         │       │   JSPWiki       │       │   lldap (Web)   │    │  Registration   │
+│                 │       │                 │       │                 │    │                 │
+│   Port: 3000    │       │   Port: 8080    │       │   Port: 17170   │    │   Port: 5000    │
+│                 │       │                 │       │                 │    │                 │
+│   Auth: OIDC    │       │ Auth: Remote-   │       │ Auth: Remote-   │    │ / - Public      │
+│   (OAuth2)      │       │   User Header   │       │   User Header   │    │ /admin - Auth   │
+└────────┬────────┘       └────────┬────────┘       └─────────────────┘    └────────┬────────┘
+         │                         │                                                 │
+         │ OIDC Protocol           │ LDAP Query                           GraphQL API│
+         │                         │ (User Sync)                          (Create User)
+         ▼                         ▼                                                 │
+┌────────────────────────────────────────────┐                                      │
+│          Authelia                          │                                      │
+│                                            │                                      │
+│  - OIDC Provider (/.well-known/...)        │                                      │
+│  - Forward-Auth Endpoint (/api/authz/...)  │                                      │
+│  - Session Management                      │                                      │
+│  - 2FA/TOTP Validation                     │                                      │
+│  - Access Control Policies                 │                                      │
+│                                            │                                      │
+│  Port: 9091                                │                                      │
+└──────────────────┬─────────────────────────┘                                      │
+                   │                                                                 │
+                   │ LDAP Protocol                                                   │
+                   │ (Credential Validation)                                         │
+                   ▼                                                                 ▼
+         ┌──────────────────────┐ ◄─────────────────────────────────────────────────┘
          │   lldap              │
          │                      │
          │   User Database      │
@@ -73,7 +73,8 @@ This document provides a detailed technical explanation of how the Organization 
          │   - Groups           │
          │   - Credentials      │
          │                      │
-         │   LDAP Port: 3890    │
+         │   LDAP: 3890         │
+         │   HTTP: 17170        │
          └──────────────────────┘
 ```
 
@@ -296,10 +297,10 @@ User                 Caddy                  Authelia               JSPWiki
  │                     │ 8. Forward to JSPWiki  │                      │
  │                     │    with Remote-User    │                      │
  │                     │    header              │                      │
- │                     ├─────────────────────────────────────────────►│
+ │                     ├──────────────────────────────────────────────►│
  │                     │                        │                      │
  │                     │ 9. Response            │                      │
- │                     │◄─────────────────────────────────────────────┤
+ │                     │◄──────────────────────────────────────────────┤
  │                     │                        │                      │
  │ 10. Page delivered  │                        │                      │
  │◄────────────────────┤                        │                      │
@@ -508,6 +509,308 @@ JSPWiki needs users in its own XML databases for permissions. Our `ldap-sync.sh`
 - `/var/jspwiki/pages/` - Wiki pages (markdown)
 - `/var/jspwiki/etc/userdatabase.xml` - User database (synced from LDAP)
 - `/var/jspwiki/etc/groupdatabase.xml` - Group mappings
+
+### Registration Service - User Self-Provisioning
+
+**Purpose**: Allow users to request accounts without admin intervention in lldap
+
+**Architecture**: FastAPI + SQLite + lldap GraphQL API
+
+**Why a separate service?**
+- lldap doesn't have built-in self-registration
+- Maintains audit trail of registration requests
+- Allows admin approval workflow
+- Generates secure random passwords automatically
+
+**Authentication Methods**:
+1. **Public Route** (`/`) - Registration form (no auth required)
+2. **Protected Route** (`/admin`) - Admin dashboard (forward-auth via Authelia)
+
+**Workflow:**
+
+```
+┌─────────────┐
+│   User      │
+│   (Public)  │
+└──────┬──────┘
+       │
+       │ 1. Fill registration form
+       │    (username, email, name, reason)
+       ▼
+┌────────────────────┐
+│  Registration      │
+│  Service           │
+│  (FastAPI)         │
+└─────┬──────────────┘
+      │
+      │ 2. Store in SQLite
+      │    status='pending'
+      │
+      │ 3. Notify admin (email)
+      │
+      ▼
+┌────────────────────┐
+│   Admin            │
+│   (Authenticated)  │
+└─────┬──────────────┘
+      │
+      │ 4. Review at /admin
+      │    (protected by Authelia)
+      │
+      │ 5. Approve or Reject
+      │
+      ▼
+┌────────────────────┐
+│  Registration      │
+│  Service           │
+│  (GraphQL Client)  │
+└─────┬──────────────┘
+      │
+      │ 6. If approved:
+      │    - Generate random password
+      │    - Create user via GraphQL
+      │
+      ▼
+┌────────────────────┐
+│   lldap            │
+│   (GraphQL API)    │
+└─────┬──────────────┘
+      │
+      │ 7. User created
+      │
+      ▼
+┌────────────────────┐
+│   User             │
+│   (Email)          │
+└────────────────────┘
+      8. Receive credentials
+         via email
+```
+
+**Database Schema:**
+
+```sql
+CREATE TABLE registration_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    reason TEXT,
+    status TEXT DEFAULT 'pending',        -- pending, approved, rejected
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TIMESTAMP,
+    reviewed_by TEXT,                     -- from Remote-User header
+    rejection_reason TEXT,
+    ip_address TEXT,
+    user_agent TEXT
+);
+
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER,
+    action TEXT NOT NULL,                 -- CREATED, APPROVED, REJECTED, APPROVE_FAILED
+    performed_by TEXT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    details TEXT,
+    FOREIGN KEY (request_id) REFERENCES registration_requests(id)
+);
+```
+
+**lldap GraphQL Integration:**
+
+The service authenticates to lldap's GraphQL API using the admin credentials from `/secrets-lldap/LDAP_USER_PASS`:
+
+```python
+# 1. Login to get JWT token
+POST http://lldap:17170/auth/simple/login
+Body: {"username": "admin", "password": "..."}
+Response: {"token": "eyJhbGciOi..."}
+
+# 2. Create user via GraphQL
+POST http://lldap:17170/api/graphql
+Headers: Authorization: Bearer eyJhbGciOi...
+Body: {
+  "query": "mutation CreateUser($user: CreateUserInput!) { ... }",
+  "variables": {
+    "user": {
+      "id": "newuser",
+      "email": "user@example.com",
+      "displayName": "New User",
+      "firstName": "New",
+      "lastName": "User"
+    }
+  }
+}
+
+# 3. Set password
+POST http://lldap:17170/api/graphql
+Body: {
+  "query": "mutation UpdatePassword($userId: String!, $password: String!) { ... }",
+  "variables": {
+    "userId": "newuser",
+    "password": "random-generated-password"
+  }
+}
+```
+
+**Configuration** (`.env`):
+- `REGISTRATION_SUBDOMAIN=register` - Subdomain for registration service
+- `REGISTRATION_ADMIN_EMAIL` - Email for admin notifications (optional)
+- `SMTP_ENABLED=false` - Enable SMTP for email notifications (future feature)
+
+**Security Considerations:**
+- Public form validates input (alphanumeric usernames, valid emails)
+- Rate limiting via Caddy (not yet implemented - recommended for production)
+- Admin dashboard protected by Authelia forward-auth
+- lldap admin credentials read from file-based secrets (read-only mount)
+- Audit trail tracks all actions with timestamps and actors
+- Random password generation uses Python `secrets` module (cryptographically secure)
+
+**Storage:**
+- SQLite database: `/data/registrations.db`
+- Backed up with Docker volume `registration_data`
+
+**Port:** 5000 (internal, not exposed - accessed via Caddy)
+
+#### LDAP Coherence Strategy
+
+**The Problem:**
+
+The registration service maintains a record of approved users in its SQLite database, but these users are also stored in lldap. If an admin deletes a user directly from lldap (via the lldap web UI or ldapdelete command), the registration service's database becomes inconsistent with reality:
+
+```
+Registration DB: user 'bob' - status='approved'
+lldap Reality:   user 'bob' - does not exist ❌
+```
+
+This creates a coherence problem: Should the registration service automatically recreate deleted users? Automatically update its database? Or require manual intervention?
+
+**Design Decision: Manual Reconciliation with Visual Feedback**
+
+We chose a **manual reconciliation** approach rather than automatic synchronization:
+
+**Rationale:**
+1. **Visibility**: Admins can see when users have been deleted from lldap via status badges
+2. **Control**: Admins explicitly choose whether to recreate deleted users or leave them deleted
+3. **Audit Trail**: All actions are logged, showing who made what decision
+4. **Safety**: Prevents automated recreation of intentionally deleted users
+5. **Simplicity**: No background sync jobs, no conflict resolution logic
+
+**Trade-offs:**
+- ✅ Clear admin intent (explicit action required)
+- ✅ No hidden automation bugs
+- ✅ Simple implementation and testing
+- ❌ Requires admin awareness (must check dashboard)
+- ❌ Not real-time (status checked on page load)
+
+**Implementation:**
+
+The admin dashboard checks LDAP existence for each approved user on every page load:
+
+```python
+# Check lldap existence for approved users
+for user in approved:
+    user_dict['exists_in_lldap'] = check_user_exists_in_lldap(user['username'])
+```
+
+**Visual Feedback:**
+- ✅ **Active badge**: User exists in lldap (green)
+- ❌ **Deleted from LDAP badge**: User missing from lldap (red)
+
+**Smart Button Logic:**
+
+The UI adapts based on LDAP status:
+
+| User Status | LDAP Status | Button Shown | Action |
+|-------------|-------------|--------------|---------|
+| Approved | Exists | "Reject" | Delete from LDAP + move to rejected |
+| Approved | Missing | "Approve" | Recreate in LDAP with new password |
+| Rejected | - | "Approve" | Create in LDAP + move to approved |
+
+**Endpoint Consolidation:**
+
+The `/admin/re-approve/{request_id}` endpoint handles both scenarios intelligently:
+
+```python
+@app.post('/admin/re-approve/{request_id}')
+async def re_approve_request(request_id: int, request: Request):
+    """Re-approve rejected user or recreate deleted approved user in lldap"""
+
+    # Works for both rejected users and approved users deleted from LDAP
+    if req['status'] not in ('rejected', 'approved'):
+        return RedirectResponse(url='/admin', status_code=303)
+
+    # Skip if user already exists in LDAP
+    if check_user_exists_in_lldap(req['username']):
+        return RedirectResponse(url='/admin', status_code=303)
+
+    # Create user in lldap with new generated password
+    success, password, error = await create_lldap_user(...)
+
+    if success:
+        if req['status'] == 'rejected':
+            # Update database: rejected → approved
+            db.execute('UPDATE registration_requests SET status = "approved" ...')
+            log_audit(request_id, 'RE_APPROVED', admin_user, ...)
+        else:
+            # Already approved, just recreating in LDAP (status stays 'approved')
+            log_audit(request_id, 'RECREATED_IN_LDAP', admin_user, ...)
+
+        # Notify user with new password
+        notify_user_approved(req['email'], req['username'], password)
+```
+
+**Key Implementation Details:**
+
+1. **LDAP Existence Check**: Uses `ldapsearch` to query lldap for each user
+2. **Password Generation**: Always generates a new 20-character random password on recreation
+3. **Audit Logging**: Different audit log entries for RE_APPROVED vs RECREATED_IN_LDAP
+4. **Email Notification**: User receives new credentials when recreated
+5. **Idempotency**: Recreating an existing user is a no-op (safe button mashing)
+
+**Performance Consideration:**
+
+The LDAP existence check runs for every approved user on every admin dashboard page load. For large user counts (100+ approved users), consider:
+- Caching LDAP status with TTL (e.g., 60 seconds)
+- Pagination of approved users (already limited to 20 via `LIMIT 20`)
+- Background job to update status asynchronously
+
+For deployments with <100 users, the current implementation is performant and simple.
+
+**Alternative Approaches Considered:**
+
+1. **Automatic Recreation**: Background job recreates deleted users
+   - ❌ Defeats purpose of deletion (user deleted for a reason)
+   - ❌ Hidden automation, harder to debug
+
+2. **Automatic Status Update**: Mark approved users as "deleted" in registration DB
+   - ❌ Loses approval history
+   - ❌ Requires new status value, complicates state machine
+
+3. **Soft Delete in lldap**: Flag users as deleted instead of removing
+   - ❌ Requires lldap schema changes
+   - ❌ Not under our control (lldap is upstream project)
+
+4. **Real-time Webhook**: lldap notifies registration service on user deletion
+   - ❌ lldap doesn't support webhooks
+   - ❌ Added complexity (webhook listener, retry logic)
+
+**Recommended Workflow:**
+
+For admins using this system:
+
+1. **Regular Review**: Check admin dashboard periodically for "Deleted from LDAP" badges
+2. **Intentional Deletion**: When deleting users from lldap, move them to "rejected" in registration service first
+3. **Accidental Deletion**: If user accidentally deleted, click "Approve" to recreate with new password
+4. **User Communication**: Always notify users when their account is deleted or recreated
+
+**Future Enhancements:**
+
+If automatic synchronization becomes necessary:
+- Add cron job that runs nightly: compare approved users with lldap
+- Send email digest to admins listing discrepancies
+- Optionally: auto-archive approved users missing from lldap (status → 'archived')
 
 ### Caddy - Reverse Proxy
 

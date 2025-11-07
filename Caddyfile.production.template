@@ -5,12 +5,29 @@
     forward_auth authelia:9091 {
         uri /api/authz/forward-auth
         copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Uri {uri}
+        header_up X-Forwarded-For {remote_host}
     }
 }
 
 # Authelia - NO forward auth (must be accessible for login)
 ${AUTHELIA_SUBDOMAIN}.${BASE_DOMAIN} {
-    reverse_proxy authelia:9091
+    reverse_proxy authelia:9091 {
+        # Pass through all headers properly
+        header_up Host {upstream_hostport}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+
+        # Increase timeouts for slow connections
+        transport http {
+            read_timeout 60s
+            write_timeout 60s
+        }
+    }
 }
 
 # Gitea - Uses OIDC for authentication (no forward_auth)
@@ -28,4 +45,18 @@ ${WIKI_SUBDOMAIN}.${BASE_DOMAIN} {
 ${LLDAP_SUBDOMAIN}.${BASE_DOMAIN} {
     import auth
     reverse_proxy lldap:17170
+}
+
+# Registration - Public form, protected admin dashboard
+${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN} {
+    # Admin dashboard requires authentication
+    route /admin* {
+        import auth
+        reverse_proxy registration:5000
+    }
+
+    # Public registration form (no auth required)
+    route {
+        reverse_proxy registration:5000
+    }
 }
