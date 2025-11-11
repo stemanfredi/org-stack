@@ -516,11 +516,12 @@ JSPWiki needs users in its own XML databases for permissions. Our `ldap-sync.sh`
 
 **Architecture**: FastAPI + SQLite + lldap GraphQL API
 
-**Why a separate service?**
-- lldap doesn't have built-in self-registration
-- Maintains audit trail of registration requests
-- Allows admin approval workflow
-- Generates secure random passwords automatically
+**Features:**
+- Public registration form
+- Admin approval workflow
+- Audit trail of all decisions
+- Automatic user creation in lldap
+- Secure random password generation
 
 **Authentication Methods**:
 1. **Public Route** (`/`) - Registration form (no auth required)
@@ -590,6 +591,7 @@ JSPWiki needs users in its own XML databases for permissions. Our `ldap-sync.sh`
 **Database Schema:**
 
 ```sql
+-- Pending registration requests
 CREATE TABLE registration_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
@@ -597,25 +599,30 @@ CREATE TABLE registration_requests (
     first_name TEXT NOT NULL,
     last_name TEXT NOT NULL,
     reason TEXT,
-    status TEXT DEFAULT 'pending',        -- pending, approved, rejected
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    reviewed_at TIMESTAMP,
-    reviewed_by TEXT,                     -- from Remote-User header
-    rejection_reason TEXT,
     ip_address TEXT,
     user_agent TEXT
 );
 
+-- Historical audit log
 CREATE TABLE audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id INTEGER,
-    action TEXT NOT NULL,                 -- CREATED, APPROVED, REJECTED, APPROVE_FAILED
+    username TEXT NOT NULL,
+    email TEXT NOT NULL,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    reason TEXT,
+    action TEXT NOT NULL,
     performed_by TEXT,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    details TEXT,
-    FOREIGN KEY (request_id) REFERENCES registration_requests(id)
+    rejection_reason TEXT,
+    ip_address TEXT,
+    user_agent TEXT,
+    created_at TIMESTAMP,
+    reviewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+Workflow: Request submitted → Pending queue → Approve/Reject → Audit log
 
 **lldap GraphQL Integration:**
 
@@ -655,17 +662,16 @@ Body: {
 ```
 
 **Configuration** (`.env`):
-- `REGISTRATION_SUBDOMAIN=register` - Subdomain for registration service
-- `REGISTRATION_ADMIN_EMAIL` - Email for admin notifications (optional)
-- `SMTP_ENABLED=false` - Enable SMTP for email notifications (future feature)
+- `REGISTRATION_SUBDOMAIN=register`
+- `REGISTRATION_ADMIN_EMAIL` - For admin notifications
+- `SMTP_ENABLED=false` - Enable email notifications
 
-**Security Considerations:**
-- Public form validates input (alphanumeric usernames, valid emails)
-- Rate limiting via Caddy (not yet implemented - recommended for production)
-- Admin dashboard protected by Authelia forward-auth
-- lldap admin credentials read from file-based secrets (read-only mount)
-- Audit trail tracks all actions with timestamps and actors
-- Random password generation uses Python `secrets` module (cryptographically secure)
+**Security:**
+- Input validation (alphanumeric usernames, valid emails)
+- Admin dashboard protected by Authelia
+- File-based secrets (read-only)
+- Cryptographically secure password generation
+- Full audit trail
 
 **Storage:**
 - SQLite database: `/data/registrations.db`
@@ -673,144 +679,32 @@ Body: {
 
 **Port:** 5000 (internal, not exposed - accessed via Caddy)
 
-#### LDAP Coherence Strategy
+#### User Management
 
-**The Problem:**
+**Single Source of Truth: lldap**
 
-The registration service maintains a record of approved users in its SQLite database, but these users are also stored in lldap. If an admin deletes a user directly from lldap (via the lldap web UI or ldapdelete command), the registration service's database becomes inconsistent with reality:
+The registration service handles the approval workflow only. Once approved, users are created in lldap and managed there exclusively.
 
 ```
-Registration DB: user 'bob' - status='approved'
-lldap Reality:   user 'bob' - does not exist ❌
+Registration Service  →  Handles approval workflow
+                        Creates users in lldap when approved
+
+lldap                →  Manages all active users
+                        User attributes, groups, credentials
 ```
 
-This creates a coherence problem: Should the registration service automatically recreate deleted users? Automatically update its database? Or require manual intervention?
+**Admin Workflow:**
 
-**Design Decision: Manual Reconciliation with Visual Feedback**
+1. Review pending requests at `/admin`
+2. Approve → User created in lldap automatically
+3. Reject → Logged to audit trail
+4. Manage active users in lldap web interface
 
-We chose a **manual reconciliation** approach rather than automatic synchronization:
+**API Endpoints:**
 
-**Rationale:**
-1. **Visibility**: Admins can see when users have been deleted from lldap via status badges
-2. **Control**: Admins explicitly choose whether to recreate deleted users or leave them deleted
-3. **Audit Trail**: All actions are logged, showing who made what decision
-4. **Safety**: Prevents automated recreation of intentionally deleted users
-5. **Simplicity**: No background sync jobs, no conflict resolution logic
-
-**Trade-offs:**
-- ✅ Clear admin intent (explicit action required)
-- ✅ No hidden automation bugs
-- ✅ Simple implementation and testing
-- ❌ Requires admin awareness (must check dashboard)
-- ❌ Not real-time (status checked on page load)
-
-**Implementation:**
-
-The admin dashboard checks LDAP existence for each approved user on every page load:
-
-```python
-# Check lldap existence for approved users
-for user in approved:
-    user_dict['exists_in_lldap'] = check_user_exists_in_lldap(user['username'])
-```
-
-**Visual Feedback:**
-- ✅ **Active badge**: User exists in lldap (green)
-- ❌ **Deleted from LDAP badge**: User missing from lldap (red)
-
-**Smart Button Logic:**
-
-The UI adapts based on LDAP status:
-
-| User Status | LDAP Status | Button Shown | Action |
-|-------------|-------------|--------------|---------|
-| Approved | Exists | "Reject" | Delete from LDAP + move to rejected |
-| Approved | Missing | "Approve" | Recreate in LDAP with new password |
-| Rejected | - | "Approve" | Create in LDAP + move to approved |
-
-**Endpoint Consolidation:**
-
-The `/admin/re-approve/{request_id}` endpoint handles both scenarios intelligently:
-
-```python
-@app.post('/admin/re-approve/{request_id}')
-async def re_approve_request(request_id: int, request: Request):
-    """Re-approve rejected user or recreate deleted approved user in lldap"""
-
-    # Works for both rejected users and approved users deleted from LDAP
-    if req['status'] not in ('rejected', 'approved'):
-        return RedirectResponse(url='/admin', status_code=303)
-
-    # Skip if user already exists in LDAP
-    if check_user_exists_in_lldap(req['username']):
-        return RedirectResponse(url='/admin', status_code=303)
-
-    # Create user in lldap with new generated password
-    success, password, error = await create_lldap_user(...)
-
-    if success:
-        if req['status'] == 'rejected':
-            # Update database: rejected → approved
-            db.execute('UPDATE registration_requests SET status = "approved" ...')
-            log_audit(request_id, 'RE_APPROVED', admin_user, ...)
-        else:
-            # Already approved, just recreating in LDAP (status stays 'approved')
-            log_audit(request_id, 'RECREATED_IN_LDAP', admin_user, ...)
-
-        # Notify user with new password
-        notify_user_approved(req['email'], req['username'], password)
-```
-
-**Key Implementation Details:**
-
-1. **LDAP Existence Check**: Uses `ldapsearch` to query lldap for each user
-2. **Password Generation**: Always generates a new 20-character random password on recreation
-3. **Audit Logging**: Different audit log entries for RE_APPROVED vs RECREATED_IN_LDAP
-4. **Email Notification**: User receives new credentials when recreated
-5. **Idempotency**: Recreating an existing user is a no-op (safe button mashing)
-
-**Performance Consideration:**
-
-The LDAP existence check runs for every approved user on every admin dashboard page load. For large user counts (100+ approved users), consider:
-- Caching LDAP status with TTL (e.g., 60 seconds)
-- Pagination of approved users (already limited to 20 via `LIMIT 20`)
-- Background job to update status asynchronously
-
-For deployments with <100 users, the current implementation is performant and simple.
-
-**Alternative Approaches Considered:**
-
-1. **Automatic Recreation**: Background job recreates deleted users
-   - ❌ Defeats purpose of deletion (user deleted for a reason)
-   - ❌ Hidden automation, harder to debug
-
-2. **Automatic Status Update**: Mark approved users as "deleted" in registration DB
-   - ❌ Loses approval history
-   - ❌ Requires new status value, complicates state machine
-
-3. **Soft Delete in lldap**: Flag users as deleted instead of removing
-   - ❌ Requires lldap schema changes
-   - ❌ Not under our control (lldap is upstream project)
-
-4. **Real-time Webhook**: lldap notifies registration service on user deletion
-   - ❌ lldap doesn't support webhooks
-   - ❌ Added complexity (webhook listener, retry logic)
-
-**Recommended Workflow:**
-
-For admins using this system:
-
-1. **Regular Review**: Check admin dashboard periodically for "Deleted from LDAP" badges
-2. **Intentional Deletion**: When deleting users from lldap, move them to "rejected" in registration service first
-3. **Accidental Deletion**: If user accidentally deleted, click "Approve" to recreate with new password
-4. **User Communication**: Always notify users when their account is deleted or recreated
-
-**Future Enhancements:**
-
-If automatic synchronization becomes necessary:
-- Add cron job that runs nightly: compare approved users with lldap
-- Send email digest to admins listing discrepancies
-- Optionally: auto-archive approved users missing from lldap (status → 'archived')
+- `GET /admin` - View pending requests and audit log
+- `POST /admin/approve/{id}` - Create user in lldap, log approval
+- `POST /admin/reject/{id}` - Log rejection with reason
 
 ### Caddy - Reverse Proxy
 

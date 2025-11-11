@@ -3,14 +3,13 @@
 User Self-Provisioning Service for org-stack
 
 Provides a public registration form and admin approval dashboard.
-Users submit registration requests which are stored in SQLite and require
-admin approval before accounts are created in lldap via GraphQL API.
+Approved users are automatically created in lldap.
 
-Architecture:
+Workflow:
 - Public registration form at /
 - Admin dashboard at /admin (protected by Authelia forward-auth)
-- Accounts created via lldap GraphQL API after approval
-- Email notifications sent to admin and user
+- Pending requests → Approve (creates in lldap) or Reject → Audit log
+- lldap is the single source of truth for all active users
 """
 
 import os
@@ -63,6 +62,7 @@ def get_db():
 
 def init_db(db: sqlite3.Connection):
     """Initialize database tables"""
+    # Pending registration requests
     db.execute('''
         CREATE TABLE IF NOT EXISTS registration_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,38 +71,32 @@ def init_db(db: sqlite3.Connection):
             first_name TEXT NOT NULL,
             last_name TEXT NOT NULL,
             reason TEXT,
-            status TEXT DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            reviewed_at TIMESTAMP,
-            reviewed_by TEXT,
-            rejection_reason TEXT,
             ip_address TEXT,
             user_agent TEXT
         )
     ''')
 
+    # Historical audit log of all approved/rejected requests
     db.execute('''
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            request_id INTEGER,
+            username TEXT NOT NULL,
+            email TEXT NOT NULL,
+            first_name TEXT NOT NULL,
+            last_name TEXT NOT NULL,
+            reason TEXT,
             action TEXT NOT NULL,
             performed_by TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            details TEXT,
-            FOREIGN KEY (request_id) REFERENCES registration_requests(id)
+            rejection_reason TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at TIMESTAMP,
+            reviewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
     db.commit()
-
-def log_audit(request_id: int, action: str, performed_by: str, details: str = ''):
-    """Log action to audit trail"""
-    with get_db() as db:
-        db.execute(
-            'INSERT INTO audit_log (request_id, action, performed_by, details) VALUES (?, ?, ?, ?)',
-            (request_id, action, performed_by, details)
-        )
-        db.commit()
 
 # =============================================================================
 # lldap GraphQL Integration
@@ -131,35 +125,6 @@ async def lldap_login() -> str:
             return response.json().get('token')
         else:
             raise Exception(f'lldap login failed: {response.status_code} {response.text}')
-
-def check_user_exists_in_lldap(username: str) -> bool:
-    """Check if user exists in lldap via LDAP search"""
-    admin_password = get_lldap_admin_password()
-    admin_dn = f'uid={LLDAP_ADMIN_USER},ou=people,{LLDAP_BASE_DN}'
-
-    try:
-        result = subprocess.run(
-            [
-                'ldapsearch',
-                '-H', 'ldap://lldap:3890',
-                '-D', admin_dn,
-                '-w', admin_password,
-                '-b', LLDAP_BASE_DN,
-                '-x',
-                f'(uid={username})',
-                'uid',
-                '-LLL'
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-
-        # If user exists, output will contain "uid: <username>"
-        return f'uid: {username}' in result.stdout
-    except Exception as e:
-        print(f'[ERROR] Failed to check user existence: {e}')
-        return False
 
 async def create_lldap_user(username: str, email: str, first_name: str, last_name: str) -> tuple[bool, str, str]:
     """
@@ -264,54 +229,6 @@ async def create_lldap_user(username: str, email: str, first_name: str, last_nam
 
     except Exception as e:
         return False, '', str(e)
-
-async def delete_lldap_user(username: str) -> tuple[bool, str]:
-    """
-    Delete user from lldap via GraphQL API
-    Returns: (success: bool, error: str)
-    """
-    try:
-        # Get admin JWT token
-        token = await lldap_login()
-
-        async with httpx.AsyncClient() as client:
-            # GraphQL mutation to delete user
-            mutation = '''
-            mutation DeleteUser($userId: String!) {
-                deleteUser(userId: $userId) {
-                    ok
-                }
-            }
-            '''
-
-            variables = {'userId': username}
-
-            print(f'[DEBUG] Deleting user {username} from lldap...')
-            response = await client.post(
-                f'{LLDAP_URL}/api/graphql',
-                json={'query': mutation, 'variables': variables},
-                headers={
-                    'Authorization': f'Bearer {token}',
-                    'Content-Type': 'application/json'
-                }
-            )
-
-            if response.status_code != 200:
-                error_msg = f'GraphQL request failed: {response.status_code} {response.text}'
-                print(f'[ERROR] {error_msg}')
-                return False, error_msg
-
-            result = response.json()
-            if 'errors' in result:
-                error_msg = result['errors'][0].get('message', 'Unknown error')
-                print(f'[ERROR] GraphQL error deleting user: {error_msg}')
-                return False, error_msg
-
-            print(f'[SUCCESS] User {username} deleted from lldap')
-            return True, ''
-
-    except Exception as e:
-        return False, str(e)
 
 # =============================================================================
 # Email Notifications
@@ -459,9 +376,6 @@ async def register_submit(
             )
             db.commit()
 
-            request_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
-            log_audit(request_id, 'CREATED', 'system', f'Registration request submitted from {request.client.host}')
-
             # Notify admin
             if ADMIN_EMAIL:
                 notify_admin_new_request(username, email, reason)
@@ -480,48 +394,33 @@ async def register_submit(
 @app.get('/admin', response_class=HTMLResponse)
 async def admin_dashboard(request: Request):
     """
-    Admin dashboard - shows pending registration requests
-
-    Protected by Authelia forward-auth at proxy level.
-    Authenticated username available in Remote-User header.
+    Admin dashboard - shows pending requests and audit log
+    Protected by Authelia forward-auth at proxy level
     """
     admin_user = request.headers.get('Remote-User', 'unknown')
 
     with get_db() as db:
-        # Get all requests grouped by status
         pending = db.execute(
-            'SELECT * FROM registration_requests WHERE status = "pending" ORDER BY created_at DESC'
+            'SELECT * FROM registration_requests ORDER BY created_at DESC'
         ).fetchall()
 
-        approved = db.execute(
-            'SELECT * FROM registration_requests WHERE status = "approved" ORDER BY reviewed_at DESC LIMIT 20'
+        audit_log = db.execute(
+            'SELECT * FROM audit_log ORDER BY reviewed_at DESC LIMIT 50'
         ).fetchall()
-
-        rejected = db.execute(
-            'SELECT * FROM registration_requests WHERE status = "rejected" ORDER BY reviewed_at DESC LIMIT 20'
-        ).fetchall()
-
-    # Check lldap existence for approved users
-    approved_with_status = []
-    for user in approved:
-        user_dict = dict(user)
-        user_dict['exists_in_lldap'] = check_user_exists_in_lldap(user['username'])
-        approved_with_status.append(user_dict)
 
     return templates.TemplateResponse(
         'admin.html',
         {
             'request': request,
             'pending': pending,
-            'approved': approved_with_status,
-            'rejected': rejected,
+            'audit_log': audit_log,
             'admin_user': admin_user
         }
     )
 
 @app.post('/admin/approve/{request_id}')
 async def approve_request(request_id: int, request: Request):
-    """Approve registration request and create user in lldap"""
+    """Approve request: create user in lldap, move to audit log"""
     admin_user = request.headers.get('Remote-User', 'unknown')
 
     with get_db() as db:
@@ -529,9 +428,6 @@ async def approve_request(request_id: int, request: Request):
 
         if not req:
             raise HTTPException(status_code=404, detail='Request not found')
-
-        if req['status'] != 'pending':
-            return RedirectResponse(url='/admin', status_code=303)
 
         # Create user in lldap with generated password
         success, password, error = await create_lldap_user(
@@ -542,29 +438,32 @@ async def approve_request(request_id: int, request: Request):
         )
 
         if success:
-            # Update database
+            # Move to audit log
             db.execute(
-                '''UPDATE registration_requests
-                   SET status = 'approved', reviewed_at = ?, reviewed_by = ?
-                   WHERE id = ?''',
-                (datetime.now(), admin_user, request_id)
+                '''INSERT INTO audit_log
+                   (username, email, first_name, last_name, reason, action, performed_by,
+                    ip_address, user_agent, created_at)
+                   VALUES (?, ?, ?, ?, ?, 'APPROVED', ?, ?, ?, ?)''',
+                (req['username'], req['email'], req['first_name'], req['last_name'],
+                 req['reason'], admin_user, req['ip_address'], req['user_agent'], req['created_at'])
             )
+
+            # Remove from pending queue
+            db.execute('DELETE FROM registration_requests WHERE id = ?', (request_id,))
             db.commit()
 
-            log_audit(request_id, 'APPROVED', admin_user, 'User created in lldap')
             print(f'[SUCCESS] User {req["username"]} approved and created in lldap by {admin_user}')
 
             # Notify user
             notify_user_approved(req['email'], req['username'], password)
         else:
-            log_audit(request_id, 'APPROVE_FAILED', admin_user, f'Error: {error}')
             print(f'[ERROR] Failed to create user {req["username"]}: {error}')
 
     return RedirectResponse(url='/admin', status_code=303)
 
 @app.post('/admin/reject/{request_id}')
 async def reject_request(request_id: int, request: Request, reason: str = Form(default='No reason provided')):
-    """Reject registration request"""
+    """Reject request: move to audit log with reason"""
     admin_user = request.headers.get('Remote-User', 'unknown')
 
     with get_db() as db:
@@ -573,116 +472,24 @@ async def reject_request(request_id: int, request: Request, reason: str = Form(d
         if not req:
             raise HTTPException(status_code=404, detail='Request not found')
 
-        if req['status'] != 'pending':
-            return RedirectResponse(url='/admin', status_code=303)
-
-        # Update database
+        # Move to audit log
         db.execute(
-            '''UPDATE registration_requests
-               SET status = 'rejected', reviewed_at = ?, reviewed_by = ?, rejection_reason = ?
-               WHERE id = ?''',
-            (datetime.now(), admin_user, reason, request_id)
+            '''INSERT INTO audit_log
+               (username, email, first_name, last_name, reason, action, performed_by,
+                rejection_reason, ip_address, user_agent, created_at)
+               VALUES (?, ?, ?, ?, ?, 'REJECTED', ?, ?, ?, ?, ?)''',
+            (req['username'], req['email'], req['first_name'], req['last_name'],
+             req['reason'], admin_user, reason, req['ip_address'], req['user_agent'], req['created_at'])
         )
+
+        # Remove from pending queue
+        db.execute('DELETE FROM registration_requests WHERE id = ?', (request_id,))
         db.commit()
 
-        log_audit(request_id, 'REJECTED', admin_user, f'Reason: {reason}')
+        print(f'[INFO] User {req["username"]} rejected by {admin_user}: {reason}')
 
         # Notify user
         notify_user_rejected(req['email'], req['username'], reason)
-
-    return RedirectResponse(url='/admin', status_code=303)
-
-@app.post('/admin/move-to-rejected/{request_id}')
-async def move_to_rejected(request_id: int, request: Request):
-    """Move approved user to rejected and delete from lldap if exists"""
-    admin_user = request.headers.get('Remote-User', 'unknown')
-
-    with get_db() as db:
-        req = db.execute('SELECT * FROM registration_requests WHERE id = ?', (request_id,)).fetchone()
-
-        if not req:
-            raise HTTPException(status_code=404, detail='Request not found')
-
-        if req['status'] != 'approved':
-            return RedirectResponse(url='/admin', status_code=303)
-
-        # Check if user exists in LDAP before trying to delete
-        deleted = False
-        if check_user_exists_in_lldap(req['username']):
-            # Delete user from lldap
-            success, error = await delete_lldap_user(req['username'])
-            if success:
-                deleted = True
-                print(f'[SUCCESS] User {req["username"]} deleted from lldap')
-            else:
-                print(f'[WARNING] Failed to delete user {req["username"]} from lldap: {error}')
-        else:
-            print(f'[INFO] User {req["username"]} not found in lldap, skipping deletion')
-
-        # Update database
-        db.execute(
-            '''UPDATE registration_requests
-               SET status = 'rejected', reviewed_at = ?, reviewed_by = ?, rejection_reason = ?
-               WHERE id = ?''',
-            (datetime.now(), admin_user, 'Rejected by admin', request_id)
-        )
-        db.commit()
-
-        log_audit(request_id, 'MOVED_TO_REJECTED', admin_user,
-                  f'User moved from approved to rejected, deleted from lldap: {deleted}')
-
-    return RedirectResponse(url='/admin', status_code=303)
-
-@app.post('/admin/re-approve/{request_id}')
-async def re_approve_request(request_id: int, request: Request):
-    """Re-approve rejected user or recreate deleted approved user in lldap"""
-    admin_user = request.headers.get('Remote-User', 'unknown')
-
-    with get_db() as db:
-        req = db.execute('SELECT * FROM registration_requests WHERE id = ?', (request_id,)).fetchone()
-
-        if not req:
-            raise HTTPException(status_code=404, detail='Request not found')
-
-        # Works for both rejected users and approved users deleted from LDAP
-        if req['status'] not in ('rejected', 'approved'):
-            return RedirectResponse(url='/admin', status_code=303)
-
-        # Check if user already exists in LDAP (skip if already exists)
-        if check_user_exists_in_lldap(req['username']):
-            print(f'[INFO] User {req["username"]} already exists in lldap, skipping creation')
-            return RedirectResponse(url='/admin', status_code=303)
-
-        # Create user in lldap with new generated password
-        success, password, error = await create_lldap_user(
-            req['username'],
-            req['email'],
-            req['first_name'],
-            req['last_name']
-        )
-
-        if success:
-            # Update database only if currently rejected
-            if req['status'] == 'rejected':
-                db.execute(
-                    '''UPDATE registration_requests
-                       SET status = 'approved', reviewed_at = ?, reviewed_by = ?, rejection_reason = NULL
-                       WHERE id = ?''',
-                    (datetime.now(), admin_user, request_id)
-                )
-                db.commit()
-                log_audit(request_id, 'RE_APPROVED', admin_user, 'User re-approved and created in lldap')
-                print(f'[SUCCESS] User {req["username"]} re-approved and created in lldap by {admin_user}')
-            else:
-                # Already approved, just recreating in LDAP
-                log_audit(request_id, 'RECREATED_IN_LDAP', admin_user, 'User recreated in lldap after external deletion')
-                print(f'[SUCCESS] User {req["username"]} recreated in lldap by {admin_user}')
-
-            # Notify user with their new password
-            notify_user_approved(req['email'], req['username'], password)
-        else:
-            log_audit(request_id, 'CREATE_FAILED', admin_user, f'Error: {error}')
-            print(f'[ERROR] Failed to create user {req["username"]}: {error}')
 
     return RedirectResponse(url='/admin', status_code=303)
 

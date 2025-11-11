@@ -8,6 +8,11 @@
     <div class="user-info">Logged in as: <strong>{{ admin_user }}</strong></div>
 </div>
 
+<p class="info-text">
+    <strong>Note:</strong> lldap is the single source of truth for user management.
+    Approve requests to create users in lldap. Manage active users directly in lldap.
+</p>
+
 <h2>Pending Requests ({{ pending|length }})</h2>
 {% if pending %}
 <table>
@@ -31,10 +36,14 @@
             <td>{{ req.created_at[:19] }}</td>
             <td>
                 <form method="post" action="/admin/approve/{{ req.id }}" style="display: inline; margin-right: 0.5rem;">
-                    <button type="submit" class="btn-success">Approve</button>
+                    <button type="submit" class="btn-success"
+                            onclick="return confirm('Approve this user and create account in lldap?')">
+                        Approve
+                    </button>
                 </form>
                 <form method="post" action="/admin/reject/{{ req.id }}" style="display: inline;">
-                    <input type="hidden" name="reason" value="Request denied by administrator">
+                    <input type="text" name="reason" placeholder="Rejection reason (optional)"
+                           style="width: 200px; margin-right: 0.5rem;">
                     <button type="submit" class="btn-danger"
                             onclick="return confirm('Reject this request?')">
                         Reject
@@ -49,96 +58,52 @@
 <div class="empty-state">No pending requests</div>
 {% endif %}
 
-<h2>Recently Approved ({{ approved|length }})</h2>
-{% if approved %}
-<table>
-    <thead>
-        <tr>
-            <th>Username</th>
-            <th>Name</th>
-            <th>Email</th>
-            <th>LDAP Status</th>
-            <th>Reviewed By</th>
-            <th>Approved</th>
-            <th>Actions</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for req in approved %}
-        <tr>
-            <td><strong>{{ req.username }}</strong></td>
-            <td>{{ req.first_name }} {{ req.last_name }}</td>
-            <td>{{ req.email }}</td>
-            <td>
-                {% if req.exists_in_lldap %}
-                <span class="badge badge-success">Active ✓</span>
-                {% else %}
-                <span class="badge badge-danger">Deleted from LDAP</span>
-                {% endif %}
-            </td>
-            <td>{{ req.reviewed_by }}</td>
-            <td>{{ req.reviewed_at[:19] }}</td>
-            <td>
-                {% if req.exists_in_lldap %}
-                <form method="post" action="/admin/move-to-rejected/{{ req.id }}" style="display: inline;">
-                    <button type="submit" class="btn-danger"
-                            onclick="return confirm('Reject this user?')">
-                        Reject
-                    </button>
-                </form>
-                {% else %}
-                <form method="post" action="/admin/re-approve/{{ req.id }}" style="display: inline;">
-                    <button type="submit" class="btn-success"
-                            onclick="return confirm('Recreate user in LDAP?')">
-                        Approve
-                    </button>
-                </form>
-                {% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-{% else %}
-<div class="empty-state">No approved requests yet</div>
-{% endif %}
+<h2>Audit Log ({{ audit_log|length }} recent)</h2>
+<p class="info-text" style="font-size: 0.9rem; color: #666;">
+    Historical record of all approval and rejection decisions.
+    To manage active users, use the lldap admin interface.
+</p>
 
-<h2>Recently Rejected ({{ rejected|length }})</h2>
-{% if rejected %}
+{% if audit_log %}
 <table>
     <thead>
         <tr>
+            <th>Action</th>
             <th>Username</th>
             <th>Name</th>
             <th>Email</th>
-            <th>Rejection Reason</th>
             <th>Reviewed By</th>
-            <th>Rejected</th>
-            <th>Actions</th>
+            <th>Date</th>
+            <th>Reason</th>
         </tr>
     </thead>
     <tbody>
-        {% for req in rejected %}
+        {% for entry in audit_log %}
         <tr>
-            <td><strong>{{ req.username }}</strong></td>
-            <td>{{ req.first_name }} {{ req.last_name }}</td>
-            <td>{{ req.email }}</td>
-            <td>{{ req.rejection_reason or '-' }}</td>
-            <td>{{ req.reviewed_by }}</td>
-            <td>{{ req.reviewed_at[:19] }}</td>
             <td>
-                <form method="post" action="/admin/re-approve/{{ req.id }}" style="display: inline;">
-                    <button type="submit" class="btn-success"
-                            onclick="return confirm('Approve this user?')">
-                        Approve
-                    </button>
-                </form>
+                {% if entry.action == 'APPROVED' %}
+                <span class="badge badge-success">Approved</span>
+                {% else %}
+                <span class="badge badge-danger">Rejected</span>
+                {% endif %}
+            </td>
+            <td><strong>{{ entry.username }}</strong></td>
+            <td>{{ entry.first_name }} {{ entry.last_name }}</td>
+            <td>{{ entry.email }}</td>
+            <td>{{ entry.performed_by }}</td>
+            <td>{{ entry.reviewed_at[:19] }}</td>
+            <td>
+                {% if entry.action == 'REJECTED' %}
+                {{ entry.rejection_reason or '-' }}
+                {% else %}
+                -
+                {% endif %}
             </td>
         </tr>
         {% endfor %}
     </tbody>
 </table>
 {% else %}
-<div class="empty-state">No rejected requests yet</div>
+<div class="empty-state">No audit log entries yet</div>
 {% endif %}
 {% endblock %}

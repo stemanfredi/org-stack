@@ -96,11 +96,16 @@ After deployment, complete these steps:
    - After authentication, you'll have admin access if you're in the `lldap_admin` group
 
 4. **Enable user self-registration (optional)**
-   - Access https://register.yourdomain.com/admin (requires Authelia login)
-   - Users can register at https://register.yourdomain.com
-   - Admins approve/reject requests from the admin dashboard
-   - Approved users are automatically created in lldap with random passwords
-   - Users receive email notifications (if SMTP is configured in .env)
+   - Users can submit registration requests at https://register.yourdomain.com
+   - Admins review requests at https://register.yourdomain.com/admin (requires Authelia login)
+   - Admin dashboard shows:
+     - **Pending requests**: Approve or reject with optional reason
+     - **Audit log**: Historical record of all approval/rejection decisions
+   - When approved:
+     - User is automatically created in lldap with random password
+     - User receives email with credentials (if SMTP configured in .env)
+     - Request is moved to audit log
+   - **User management**: After approval, manage users directly in lldap (single source of truth)
 
 ## Architecture
 
