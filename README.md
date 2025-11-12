@@ -228,10 +228,19 @@ All secrets are stored as individual files (not environment variables) following
 5. **Rate Limiting**: Brute-force protection with automatic bans
 
 ### Network Security
-- Internal Docker network isolates services
-- Only Caddy exposes ports externally
-- All inter-service communication via internal network
-- Automatic HTTPS with modern TLS configuration
+
+**Hardened Configuration:**
+- **Zero Direct Access**: No service ports exposed except through Caddy
+- **Exposed Ports**: Only 80/443 (HTTP/HTTPS) and 2222 (Git SSH)
+- **Internal Communication**: All services use Docker network hostnames
+- **Authentication Required**: Every service requires Authelia login (except public registration form)
+- **TLS Termination**: Caddy handles all HTTPS with automatic certificate management
+- **Network Isolation**: Services isolated on internal Docker bridge network
+
+**Port Summary:**
+- `80/443` → Caddy (reverse proxy) → All web services
+- `2222` → Gitea SSH (for Git operations only)
+- All other services accessible ONLY via Caddy with Authelia authentication
 
 ## Protocols & Technologies
 
@@ -379,13 +388,29 @@ org-stack/
 
 ## Production Recommendations
 
-1. **DNS Configuration**: Ensure A records point to your server
-2. **Firewall**: Open ports 80, 443, and optionally 2222 (Git SSH)
-3. **Backups**: Schedule regular backups with `./manage.sh backup`
-4. **Monitoring**: Set up monitoring for container health
-5. **Updates**: Regularly update with `./manage.sh update`
-6. **SMTP**: Configure email notifier in `authelia/configuration.yml.template` (replace filesystem notifier)
-7. **Database**: Consider PostgreSQL instead of SQLite for Gitea in high-traffic scenarios
+### Network Security
+1. **Firewall Rules**:
+   ```bash
+   # Allow only necessary ports
+   ufw allow 80/tcp    # HTTP (redirects to HTTPS)
+   ufw allow 443/tcp   # HTTPS
+   ufw allow 2222/tcp  # Git SSH (optional, only if using Git SSH)
+   ufw allow 22/tcp    # SSH for server management
+   ufw enable
+   ```
+2. **Port Verification**: Only 80, 443, and 2222 should be accessible externally
+3. **DNS Configuration**: Ensure A records point to your server for all subdomains
+
+### Operational Security
+4. **Backups**: Schedule regular backups with `./manage.sh backup`
+5. **Monitoring**: Set up monitoring for container health and authentication failures
+6. **Updates**: Regularly update with `./manage.sh update`
+7. **Secrets Rotation**: Periodically regenerate secrets and redeploy
+8. **SMTP**: Configure real email notifier in `.env` (replace file-based logging)
+
+### Performance
+9. **Database**: Consider PostgreSQL instead of SQLite for Gitea in high-traffic scenarios
+10. **Rate Limiting**: Configure Caddy rate limiting for public endpoints
 
 ## Contributing
 

@@ -107,6 +107,75 @@ org-stack/
     └── CLAUDE.md             # This file (AI assistant guidance)
 ```
 
+## Security Considerations
+
+### LDAP Injection Prevention
+
+The registration service handles user input that is used in LDAP operations. Always follow these practices:
+
+**Input Validation (Defense Layer 1):**
+- Username: Strict validation - alphanumeric + underscore only, must start with letter, 2-64 chars
+- Email: Basic format validation
+- Names: Length limits (max 100 characters)
+- Apply validation at form submission AND before LDAP operations (defense in depth)
+
+**LDAP DN Escaping (Defense Layer 2):**
+```python
+def escape_ldap_dn(value: str) -> str:
+    """Escape LDAP DN special characters per RFC 4514"""
+    # Escape: , \ # + < > ; " =
+    # Also escape leading/trailing spaces
+```
+
+**Always escape when constructing DNs:**
+```python
+# BAD - Vulnerable to injection
+user_dn = f'uid={username},ou=people,dc=example,dc=com'
+
+# GOOD - Escaped and validated
+if not validate_username_strict(username):
+    raise ValueError("Invalid username")
+escaped_username = escape_ldap_dn(username)
+user_dn = f'uid={escaped_username},ou=people,dc=example,dc=com'
+```
+
+**LDAP Filter Escaping:**
+If you add ldapsearch operations, escape filter values:
+```python
+def escape_ldap_filter(value: str) -> str:
+    """Escape LDAP filter special characters"""
+    # Escape: * ( ) \ NULL
+    value = value.replace('\\', '\\5c')
+    value = value.replace('*', '\\2a')
+    value = value.replace('(', '\\28')
+    value = value.replace(')', '\\29')
+    value = value.replace('\x00', '\\00')
+    return value
+```
+
+### SQL Injection Prevention
+
+Always use parameterized queries:
+```python
+# GOOD - Parameterized
+db.execute('SELECT * FROM users WHERE username = ?', (username,))
+
+# BAD - String interpolation
+db.execute(f'SELECT * FROM users WHERE username = "{username}"')
+```
+
+### GraphQL Security
+
+The lldap GraphQL API is safe from injection because it uses parameterized variables. Always pass user input as variables, never in the query string:
+```python
+# GOOD - Parameterized variables
+variables = {'user': {'id': username, 'email': email}}
+response = client.post(url, json={'query': mutation, 'variables': variables})
+
+# BAD - String interpolation in query
+query = f'mutation {{ createUser(id: "{username}") }}'  # Vulnerable!
+```
+
 ## Common Tasks
 
 ### Adding a New Configuration Option

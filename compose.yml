@@ -16,12 +16,10 @@ services:
   # ===========================================================================
   # Centralized user and group management
   # All user credentials are stored here; other services authenticate against it
+  # Accessible only via Caddy (web UI) and internal Docker network (LDAP protocol)
   lldap:
     image: lldap/lldap:stable
     container_name: lldap
-    ports:
-      - "${LLDAP_LDAP_PORT:-3890}:3890"      # LDAP protocol port
-      - "${LLDAP_HTTP_PORT:-17170}:17170"    # Web admin interface
     environment:
       - UID=${USER_UID:-1000}
       - GID=${USER_GID:-1000}
@@ -41,11 +39,10 @@ services:
   # ===========================================================================
   # Provides single sign-on, two-factor authentication, and access control
   # Acts as both OIDC provider (for Gitea) and forward-auth endpoint (for Wiki/lldap)
+  # Accessible only via Caddy and internal Docker network
   authelia:
     image: authelia/authelia:latest
     container_name: authelia
-    ports:
-      - "${AUTHELIA_PORT:-9091}:9091"
     environment:
       - TZ=${TZ:-UTC}
       # All secrets loaded from files for security
@@ -71,12 +68,13 @@ services:
   # ===========================================================================
   # Git repository hosting with web UI
   # Uses OIDC to authenticate users through Authelia (SSO)
+  # Web interface accessible only via Caddy
+  # SSH exposed for Git operations (git clone, push, pull)
   gitea:
     image: gitea/gitea:latest
     container_name: gitea
     ports:
-      - "${GITEA_HTTP_PORT:-3000}:3000"      # Web interface
-      - "${GITEA_SSH_PORT:-2222}:22"         # Git SSH access
+      - "${GITEA_SSH_PORT:-2222}:22"         # Git SSH access (required for git operations)
     environment:
       - USER_UID=${USER_UID:-1000}
       - USER_GID=${USER_GID:-1000}
@@ -128,14 +126,13 @@ services:
   # Public registration form and admin approval dashboard
   # Public route: / (registration form)
   # Protected route: /admin (requires forward-auth via Authelia)
-  # Creates approved users in lldap via GraphQL API
+  # Creates approved users in lldap via LDAP protocol (ldapadd + ldappasswd)
   registration:
     build: ./registration                    # FastAPI application
     container_name: registration
     user: "${USER_UID:-1000}:${USER_GID:-1000}"
     environment:
       - DATABASE_PATH=/data/registrations.db
-      - LLDAP_URL=http://lldap:17170
       - LLDAP_ADMIN_USER=admin
       - LDAP_BASE_DN=${LDAP_BASE_DN}
       - ADMIN_EMAIL=${REGISTRATION_ADMIN_EMAIL:-}
@@ -186,8 +183,10 @@ services:
 # =============================================================================
 # Networks
 # =============================================================================
-# All services communicate on an internal bridge network
-# External access is only through Caddy reverse proxy
+# All services communicate on an internal bridge network using Docker hostnames
+# External access is ONLY through Caddy reverse proxy (ports 80/443)
+# Exception: Gitea SSH port for Git operations (port 2222)
+# No direct access to any service - all require Authelia authentication via Caddy
 networks:
   org-network:
     driver: bridge

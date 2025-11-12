@@ -46,10 +46,10 @@ This document provides a detailed technical explanation of how the Organization 
 │   Auth: OIDC    │       │ Auth: Remote-   │       │ Auth: Remote-   │    │ / - Public      │
 │   (OAuth2)      │       │   User Header   │       │   User Header   │    │ /admin - Auth   │
 └────────┬────────┘       └────────┬────────┘       └─────────────────┘    └────────┬────────┘
-         │                         │                                                 │
-         │ OIDC Protocol           │ LDAP Query                           GraphQL API│
+         │                         │                                                │
+         │ OIDC Protocol           │ LDAP Query                             LDAP API│
          │                         │ (User Sync)                          (Create User)
-         ▼                         ▼                                                 │
+         ▼                         ▼                                                │
 ┌────────────────────────────────────────────┐                                      │
 │          Authelia                          │                                      │
 │                                            │                                      │
@@ -61,10 +61,10 @@ This document provides a detailed technical explanation of how the Organization 
 │                                            │                                      │
 │  Port: 9091                                │                                      │
 └──────────────────┬─────────────────────────┘                                      │
-                   │                                                                 │
-                   │ LDAP Protocol                                                   │
-                   │ (Credential Validation)                                         │
-                   ▼                                                                 ▼
+                   │                                                                │
+                   │ LDAP Protocol                                                  │
+                   │ (Credential Validation)                                        │
+                   ▼                                                                ▼
          ┌──────────────────────┐ ◄─────────────────────────────────────────────────┘
          │   lldap              │
          │                      │
@@ -514,7 +514,7 @@ JSPWiki needs users in its own XML databases for permissions. Our `ldap-sync.sh`
 
 **Purpose**: Allow users to request accounts without admin intervention in lldap
 
-**Architecture**: FastAPI + SQLite + lldap GraphQL API
+**Architecture**: FastAPI + SQLite + pure LDAP operations
 
 **Features:**
 - Public registration form
@@ -564,17 +564,17 @@ JSPWiki needs users in its own XML databases for permissions. Our `ldap-sync.sh`
 ┌────────────────────┐
 │  Registration      │
 │  Service           │
-│  (GraphQL Client)  │
+│  (LDAP Client)     │
 └─────┬──────────────┘
       │
       │ 6. If approved:
       │    - Generate random password
-      │    - Create user via GraphQL
+      │    - Create user via LDAP
       │
       ▼
 ┌────────────────────┐
 │   lldap            │
-│   (GraphQL API)    │
+│   (LDAP Server)    │
 └─────┬──────────────┘
       │
       │ 7. User created
@@ -624,42 +624,47 @@ CREATE TABLE audit_log (
 
 Workflow: Request submitted → Pending queue → Approve/Reject → Audit log
 
-**lldap GraphQL Integration:**
+**lldap LDAP Integration:**
 
-The service authenticates to lldap's GraphQL API using the admin credentials from `/secrets-lldap/LDAP_USER_PASS`:
+The service creates users in lldap via pure LDAP operations using the admin credentials from `/secrets-lldap/LDAP_USER_PASS`:
 
 ```python
-# 1. Login to get JWT token
-POST http://lldap:17170/auth/simple/login
-Body: {"username": "admin", "password": "..."}
-Response: {"token": "eyJhbGciOi..."}
+# 1. Create user entry with ldapadd
+LDIF = '''
+dn: uid=newuser,ou=people,dc=example,dc=com
+objectClass: person
+objectClass: inetOrgPerson
+uid: newuser
+cn: New User
+sn: User
+givenName: New
+mail: user@example.com
+'''
 
-# 2. Create user via GraphQL
-POST http://lldap:17170/api/graphql
-Headers: Authorization: Bearer eyJhbGciOi...
-Body: {
-  "query": "mutation CreateUser($user: CreateUserInput!) { ... }",
-  "variables": {
-    "user": {
-      "id": "newuser",
-      "email": "user@example.com",
-      "displayName": "New User",
-      "firstName": "New",
-      "lastName": "User"
-    }
-  }
-}
+subprocess.run([
+    'ldapadd',
+    '-H', 'ldap://lldap:3890',
+    '-D', 'uid=admin,ou=people,dc=example,dc=com',
+    '-w', '<admin_password>',
+    '-x'
+], input=LDIF)
 
-# 3. Set password
-POST http://lldap:17170/api/graphql
-Body: {
-  "query": "mutation UpdatePassword($userId: String!, $password: String!) { ... }",
-  "variables": {
-    "userId": "newuser",
-    "password": "random-generated-password"
-  }
-}
+# 2. Set password with ldappasswd
+subprocess.run([
+    'ldappasswd',
+    '-H', 'ldap://lldap:3890',
+    '-D', 'uid=admin,ou=people,dc=example,dc=com',
+    '-w', '<admin_password>',
+    '-s', '<random_generated_password>',
+    'uid=newuser,ou=people,dc=example,dc=com'
+])
 ```
+
+**Benefits of Pure LDAP Approach:**
+- No HTTP client dependency (removed httpx)
+- Standard LDAP tools (`ldapadd`, `ldappasswd`)
+- Simpler code and fewer external dependencies
+- Works with any LDAP-compliant directory server
 
 **Configuration** (`.env`):
 - `REGISTRATION_SUBDOMAIN=register`
@@ -667,11 +672,19 @@ Body: {
 - `SMTP_ENABLED=false` - Enable email notifications
 
 **Security:**
-- Input validation (alphanumeric usernames, valid emails)
-- Admin dashboard protected by Authelia
-- File-based secrets (read-only)
-- Cryptographically secure password generation
-- Full audit trail
+- **LDAP Injection Prevention**:
+  - RFC 4514 compliant DN escaping
+  - Strict username validation (alphanumeric + underscore only)
+  - Email format validation
+  - Defense-in-depth: validation at form submission AND before LDAP operations
+- **Input Validation**:
+  - Username: 2-64 chars, must start with letter, lowercase only
+  - Email: basic format validation
+  - Names: max 100 characters
+- **Authentication**: Admin dashboard protected by Authelia
+- **Secrets**: File-based, read-only mounts
+- **Password Generation**: Cryptographically secure (20 chars)
+- **Audit Trail**: Full logging of all approval/rejection decisions
 
 **Storage:**
 - SQLite database: `/data/registrations.db`
@@ -742,38 +755,61 @@ wiki.example.com {
 
 ## Security Model
 
+### Hardened Network Architecture
+
+**Exposed Ports (Minimal Attack Surface):**
+- `80/443` (HTTP/HTTPS) - Caddy reverse proxy only
+- `2222` (SSH) - Git operations only
+- **All services**: Zero direct external access
+
+**Port Matrix:**
+
+| Service | Internal Port | External Access | Authentication |
+|---------|---------------|-----------------|----------------|
+| Caddy | 80, 443 | ✅ Public | N/A (proxy) |
+| Gitea SSH | 22 → 2222 | ✅ Public | SSH keys |
+| Authelia | 9091 | ❌ Via Caddy | None (login service) |
+| lldap Web | 17170 | ❌ Via Caddy | Authelia + lldap password |
+| lldap LDAP | 3890 | ❌ Internal only | LDAP bind |
+| Gitea Web | 3000 | ❌ Via Caddy | OIDC (Authelia) |
+| JSPWiki | 8080 | ❌ Via Caddy | Forward-Auth (Authelia) |
+| Registration | 5000 | ❌ Via Caddy | Mixed (public form + auth admin) |
+
 ### Defense in Depth
 
 **Layer 1: Network Isolation**
-- All services on internal Docker network (`org-network`)
-- Only Caddy exposes ports externally
-- Services communicate via service names (Docker DNS)
+- All services on internal Docker bridge network (`org-network`)
+- Services communicate via Docker DNS hostnames (e.g., `lldap:3890`, `authelia:9091`)
+- **Zero direct port exposure** except Caddy (80/443) and Git SSH (2222)
+- No localhost or 127.0.0.1 bindings
 
-**Layer 2: Reverse Proxy**
-- All external traffic through Caddy
-- TLS 1.2+ only
-- HTTPS redirect (except ACME challenges)
+**Layer 2: Reverse Proxy (Caddy)**
+- Single entry point for all web traffic
+- TLS 1.3 with automatic certificate management
+- HTTP → HTTPS redirect (except ACME challenges)
+- Forward-auth integration with Authelia
 
 **Layer 3: Authentication (Authelia)**
-- Centralized authentication
-- LDAP credential validation
-- Session management
-- Failed attempt tracking
+- Centralized authentication for all services
+- LDAP credential validation via lldap
+- Session management with secure cookies
+- Failed attempt tracking and auto-ban
 
 **Layer 4: Authorization (Authelia)**
 - Domain-based access policies
-- Group-based permissions
+- Group-based permissions (lldap_admin)
 - Admin-only access controls
 
 **Layer 5: Multi-Factor Authentication**
 - TOTP (Time-based One-Time Password)
 - Per-user 2FA registration
-- Enforced by policy
+- Policy-enforced (configurable)
 
 **Layer 6: Application-Level Security**
-- Gitea: OIDC token validation
-- JSPWiki: User/group permissions
-- lldap: Admin-only management UI
+- Gitea: OIDC token validation + internal OIDC auth
+- JSPWiki: Container auth (trusts Remote-User header)
+- lldap: Admin password required after Authelia auth
+- Registration: Public form (unauthenticated) + protected admin dashboard
 
 ### Secret Management
 

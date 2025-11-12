@@ -25,16 +25,14 @@ from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-import httpx
-
 app = FastAPI(title="User Registration Service")
 templates = Jinja2Templates(directory="templates")
 
 # Configuration from environment
 DATABASE = os.environ.get('DATABASE_PATH', '/data/registrations.db')
-LLDAP_URL = os.environ.get('LLDAP_URL', 'http://lldap:17170')
 LLDAP_ADMIN_USER = os.environ.get('LLDAP_ADMIN_USER', 'admin')
 LLDAP_BASE_DN = os.environ.get('LDAP_BASE_DN', 'dc=example,dc=com')
+LDAP_HOST = 'ldap://lldap:3890'
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '')
 SMTP_ENABLED = os.environ.get('SMTP_ENABLED', 'false').lower() == 'true'
 SMTP_HOST = os.environ.get('SMTP_HOST', 'localhost')
@@ -99,7 +97,72 @@ def init_db(db: sqlite3.Connection):
     db.commit()
 
 # =============================================================================
-# lldap GraphQL Integration
+# LDAP Security - Injection Prevention
+# =============================================================================
+
+def escape_ldap_dn(value: str) -> str:
+    """
+    Escape special characters for LDAP DN (Distinguished Name)
+    RFC 4514 - Section 2.4 - Special characters that must be escaped in DN:
+    , \ # + < > ; " =
+    """
+    # Escape backslash first to avoid double-escaping
+    value = value.replace('\\', '\\\\')
+    # Escape other special DN characters
+    replacements = {
+        ',': '\\,',
+        '#': '\\#',
+        '+': '\\+',
+        '<': '\\<',
+        '>': '\\>',
+        ';': '\\;',
+        '"': '\\"',
+        '=': '\\=',
+    }
+    for char, escaped in replacements.items():
+        value = value.replace(char, escaped)
+    # Escape leading and trailing spaces
+    if value.startswith(' '):
+        value = '\\' + value
+    if value.endswith(' '):
+        value = value[:-1] + '\\ '
+    return value
+
+def validate_username_strict(username: str) -> bool:
+    """
+    Strict username validation - defense in depth
+    Only allow: lowercase letters, numbers, underscore
+    No LDAP special characters allowed
+    """
+    if not username:
+        return False
+    if len(username) < 2 or len(username) > 64:
+        return False
+    # Must be alphanumeric + underscore, lowercase only
+    if not username.replace('_', '').isalnum() or not username.islower():
+        return False
+    # Must start with letter
+    if not username[0].isalpha():
+        return False
+    return True
+
+def validate_email_basic(email: str) -> bool:
+    """Basic email validation"""
+    if not email or '@' not in email:
+        return False
+    if len(email) > 255:
+        return False
+    # Basic format check
+    parts = email.split('@')
+    if len(parts) != 2:
+        return False
+    local, domain = parts
+    if not local or not domain or '.' not in domain:
+        return False
+    return True
+
+# =============================================================================
+# lldap LDAP Integration
 # =============================================================================
 
 def get_lldap_admin_password() -> str:
@@ -110,122 +173,132 @@ def get_lldap_admin_password() -> str:
             return f.read().strip()
     return os.environ.get('LLDAP_ADMIN_PASSWORD', '')
 
-async def lldap_login() -> str:
-    """Authenticate to lldap and get JWT token"""
-    password = get_lldap_admin_password()
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f'{LLDAP_URL}/auth/simple/login',
-            json={'username': LLDAP_ADMIN_USER, 'password': password},
-            headers={'Content-Type': 'application/json'}
-        )
-
-        if response.status_code == 200:
-            return response.json().get('token')
-        else:
-            raise Exception(f'lldap login failed: {response.status_code} {response.text}')
-
 async def create_lldap_user(username: str, email: str, first_name: str, last_name: str) -> tuple[bool, str, str]:
     """
-    Create user in lldap via GraphQL API and set random password
+    Create user in lldap via pure LDAP operations
     Returns: (success: bool, password: str, error: str)
+
+    Security: Validates all inputs and escapes LDAP DN construction
+    Uses ldapadd + ldappasswd (no HTTP/GraphQL dependency)
     """
     try:
+        # SECURITY: Strict validation before LDAP operations (defense in depth)
+        if not validate_username_strict(username):
+            error_msg = 'Invalid username format'
+            print(f'[SECURITY] Username validation failed: {username}')
+            return False, '', error_msg
+
+        if not validate_email_basic(email):
+            error_msg = 'Invalid email format'
+            print(f'[SECURITY] Email validation failed: {email}')
+            return False, '', error_msg
+
+        # Validate name fields (basic length and character check)
+        if not first_name or len(first_name) > 100 or not last_name or len(last_name) > 100:
+            error_msg = 'Invalid name fields'
+            print(f'[SECURITY] Name validation failed')
+            return False, '', error_msg
+
         # Generate random password (20 chars, alphanumeric + punctuation)
         password = ''.join(secrets.choice(
             string.ascii_letters + string.digits + string.punctuation
         ) for _ in range(20))
 
-        # Get admin JWT token
-        token = await lldap_login()
+        admin_password = get_lldap_admin_password()
 
-        async with httpx.AsyncClient() as client:
-            # GraphQL mutation to create user
-            create_mutation = '''
-            mutation CreateUser($user: CreateUserInput!) {
-                createUser(user: $user) {
-                    id
-                    email
-                    displayName
-                }
-            }
-            '''
+        # SECURITY: Escape LDAP DN components to prevent injection
+        escaped_username = escape_ldap_dn(username)
+        escaped_admin_user = escape_ldap_dn(LLDAP_ADMIN_USER)
+        escaped_first_name = escape_ldap_dn(first_name)
+        escaped_last_name = escape_ldap_dn(last_name)
+        escaped_email = escape_ldap_dn(email)
 
-            create_variables = {
-                'user': {
-                    'id': username,
-                    'email': email,
-                    'displayName': f'{first_name} {last_name}',
-                    'firstName': first_name,
-                    'lastName': last_name
-                }
-            }
+        user_dn = f'uid={escaped_username},ou=people,{LLDAP_BASE_DN}'
+        admin_dn = f'uid={escaped_admin_user},ou=people,{LLDAP_BASE_DN}'
 
-            # Step 1: Create user
-            print(f'[DEBUG] Creating user {username} in lldap...')
-            response = await client.post(
-                f'{LLDAP_URL}/api/graphql',
-                json={'query': create_mutation, 'variables': create_variables},
-                headers={
-                    'Authorization': f'Bearer {token}',
-                    'Content-Type': 'application/json'
-                }
+        # Step 1: Create user entry using ldapadd with LDIF
+        print(f'[DEBUG] Creating user {username} in lldap via LDAP...')
+
+        # Create LDIF content for new user
+        # lldap requires: person, inetOrgPerson, posixAccount, mailAccount objectClasses
+        ldif_content = f'''dn: {user_dn}
+objectClass: person
+objectClass: inetOrgPerson
+uid: {escaped_username}
+cn: {escaped_first_name} {escaped_last_name}
+sn: {escaped_last_name}
+givenName: {escaped_first_name}
+mail: {escaped_email}
+'''
+
+        try:
+            # Use ldapadd to create the user
+            result = subprocess.run(
+                [
+                    'ldapadd',
+                    '-H', LDAP_HOST,
+                    '-D', admin_dn,
+                    '-w', admin_password,
+                    '-x'
+                ],
+                input=ldif_content,
+                capture_output=True,
+                text=True,
+                timeout=10
             )
 
-            if response.status_code != 200:
-                error_msg = f'GraphQL request failed: {response.status_code} {response.text}'
+            if result.returncode != 0:
+                error_msg = f'ldapadd failed: {result.stderr}'
                 print(f'[ERROR] {error_msg}')
-                return False, '', error_msg
-
-            result = response.json()
-            if 'errors' in result:
-                error_msg = result['errors'][0].get('message', 'Unknown error')
-                print(f'[ERROR] GraphQL error creating user: {error_msg}')
-                print(f'[DEBUG] Full response: {result}')
                 return False, '', error_msg
 
             print(f'[SUCCESS] User {username} created successfully in lldap')
 
-            # Step 2: Set password using LDAP protocol
-            # lldap doesn't support password setting via GraphQL, must use LDAP
-            admin_password = get_lldap_admin_password()
-            user_dn = f'uid={username},ou=people,{LLDAP_BASE_DN}'
-            admin_dn = f'uid={LLDAP_ADMIN_USER},ou=people,{LLDAP_BASE_DN}'
+        except subprocess.TimeoutExpired:
+            error_msg = 'ldapadd command timed out'
+            print(f'[ERROR] {error_msg}')
+            return False, '', error_msg
+        except Exception as e:
+            error_msg = f'ldapadd failed: {str(e)}'
+            print(f'[ERROR] {error_msg}')
+            return False, '', error_msg
 
-            print(f'[DEBUG] Setting password for user {username} via LDAP...')
-            try:
-                # Use ldappasswd to set the user's password
-                result = subprocess.run(
-                    [
-                        'ldappasswd',
-                        '-H', 'ldap://lldap:3890',
-                        '-D', admin_dn,
-                        '-w', admin_password,
-                        '-s', password,
-                        user_dn
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
+        # Step 2: Set password using ldappasswd
+        print(f'[DEBUG] Setting password for user {username} via LDAP...')
+        try:
+            result = subprocess.run(
+                [
+                    'ldappasswd',
+                    '-H', LDAP_HOST,
+                    '-D', admin_dn,
+                    '-w', admin_password,
+                    '-s', password,
+                    user_dn
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
 
-                if result.returncode != 0:
-                    error_msg = f'ldappasswd failed: {result.stderr}'
-                    print(f'[ERROR] {error_msg}')
-                    return False, '', error_msg
-
-                print(f'[SUCCESS] Password set for user {username} via LDAP')
-                return True, password, ''
-
-            except subprocess.TimeoutExpired:
-                error_msg = 'ldappasswd command timed out'
+            if result.returncode != 0:
+                error_msg = f'ldappasswd failed: {result.stderr}'
                 print(f'[ERROR] {error_msg}')
+                # Try to clean up the user entry
+                subprocess.run(['ldapdelete', '-H', LDAP_HOST, '-D', admin_dn, '-w', admin_password, user_dn],
+                             capture_output=True, timeout=10)
                 return False, '', error_msg
-            except Exception as e:
-                error_msg = f'ldappasswd failed: {str(e)}'
-                print(f'[ERROR] {error_msg}')
-                return False, '', error_msg
+
+            print(f'[SUCCESS] Password set for user {username} via LDAP')
+            return True, password, ''
+
+        except subprocess.TimeoutExpired:
+            error_msg = 'ldappasswd command timed out'
+            print(f'[ERROR] {error_msg}')
+            return False, '', error_msg
+        except Exception as e:
+            error_msg = f'ldappasswd failed: {str(e)}'
+            print(f'[ERROR] {error_msg}')
+            return False, '', error_msg
 
     except Exception as e:
         return False, '', str(e)
@@ -344,24 +417,39 @@ async def register_submit(
     reason: str = Form(default='')
 ):
     """Handle registration form submission"""
-    # Validation
+    # Sanitization
     username = username.strip().lower()  # Force lowercase
-    email = email.strip()
+    email = email.strip().lower()
     first_name = first_name.strip()
     last_name = last_name.strip()
     reason = reason.strip()
 
+    # Required fields check
     if not all([username, email, first_name, last_name]):
         return templates.TemplateResponse(
             'register.html',
             {'request': request, 'error': 'All fields except reason are required'}
         )
 
-    # Check username format (alphanumeric and underscore only, lowercase)
-    if not username.replace('_', '').isalnum() or not username.islower():
+    # SECURITY: Strict username validation
+    if not validate_username_strict(username):
         return templates.TemplateResponse(
             'register.html',
-            {'request': request, 'error': 'Username can only contain lowercase letters, numbers, and underscores'}
+            {'request': request, 'error': 'Username must be 2-64 characters, start with a letter, and contain only lowercase letters, numbers, and underscores'}
+        )
+
+    # SECURITY: Email validation
+    if not validate_email_basic(email):
+        return templates.TemplateResponse(
+            'register.html',
+            {'request': request, 'error': 'Invalid email address'}
+        )
+
+    # SECURITY: Name length validation
+    if len(first_name) > 100 or len(last_name) > 100:
+        return templates.TemplateResponse(
+            'register.html',
+            {'request': request, 'error': 'Names must be less than 100 characters'}
         )
 
     # Insert into database
