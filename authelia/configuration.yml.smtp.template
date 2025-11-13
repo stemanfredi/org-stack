@@ -108,6 +108,14 @@ identity_providers:
         - revocation
         - introspection
       allowed_origins_from_client_redirect_uris: true
+    # Include username and email in ID token for Gitea auto-provisioning
+    claims_policies:
+      gitea:
+        id_token:
+          - email
+          - email_verified
+          - preferred_username
+          - name
     clients:
       - client_id: gitea
         client_name: Gitea
@@ -123,11 +131,4 @@ identity_providers:
           - groups
         userinfo_signed_response_alg: none
         token_endpoint_auth_method: client_secret_basic
-        id_token_signing_alg: RS256
-        # Include username and email in ID token for Gitea auto-provisioning
-        claims:
-          - id_token:
-              - preferred_username
-              - email
-              - email_verified
-              - name
+        claims_policy: gitea
