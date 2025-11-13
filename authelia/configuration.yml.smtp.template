@@ -41,7 +41,13 @@ access_control:
     - domain: ${LLDAP_SUBDOMAIN}.${BASE_DOMAIN}
       policy: ${AUTH_POLICY}
     - domain: ${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN}
+      resources:
+        - '^/admin.*'
       policy: ${AUTH_POLICY}
+      subject:
+        - ['group:lldap_admin']
+    - domain: ${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN}
+      policy: bypass
     - domain: ${AUTHELIA_SUBDOMAIN}.${BASE_DOMAIN}
       policy: bypass
 
