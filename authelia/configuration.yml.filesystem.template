@@ -66,21 +66,6 @@ storage:
     path: /data/db.sqlite3
 
 notifier:
-  # Filesystem notifier (for testing/development - writes to /data/notification.txt)
-  # Uncomment below for email notifications via SMTP
-  # smtp:
-  #   address: ${SMTP_HOST}:${SMTP_PORT}
-  #   timeout: 5s
-  #   username: ${SMTP_USER}
-  #   password: ${SMTP_PASSWORD}
-  #   sender: ${SMTP_FROM}
-  #   identifier: ${AUTH_SUBDOMAIN}.${BASE_DOMAIN}
-  #   subject: "[Authelia] {title}"
-  #   startup_check_address: ${REGISTRATION_ADMIN_EMAIL}
-  #   disable_require_tls: false
-  #   disable_html_emails: false
-
-  # Using filesystem for now - switch to SMTP when configured (see SMTP_SETUP.md)
   filesystem:
     filename: /data/notification.txt
 

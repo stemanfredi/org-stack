@@ -183,6 +183,27 @@ MAX_RETRIES=3                        # Failed login attempts before ban
 
 See `.env.example` for complete documentation of all options.
 
+### SMTP Email Notifications
+
+To enable email notifications for password resets, 2FA codes, and registration approvals:
+
+1. Edit `.env` and configure SMTP settings:
+   ```bash
+   SMTP_ENABLED=true
+   SMTP_HOST="smtp.gmail.com"
+   SMTP_PORT=587
+   SMTP_USER="your-email@gmail.com"
+   SMTP_PASSWORD='your-app-password'  # Use quotes for special characters
+   SMTP_FROM="noreply@yourdomain.com"
+   ```
+
+2. Deploy changes:
+   ```bash
+   ./deploy.sh
+   ```
+
+See [SMTP_SETUP.md](SMTP_SETUP.md) for detailed configuration examples and troubleshooting.
+
 ## Management
 
 The `manage.sh` script provides common operations:

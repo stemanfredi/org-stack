@@ -52,6 +52,14 @@ services:
       - AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE=/secrets/OIDC_HMAC_SECRET
       - AUTHELIA_IDENTITY_PROVIDERS_OIDC_ISSUER_PRIVATE_KEY_FILE=/secrets/OIDC_PRIVATE_KEY
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/secrets-lldap/LDAP_USER_PASS
+      # SMTP configuration (for email notifications - see SMTP_SETUP.md)
+      - SMTP_HOST=${SMTP_HOST:-localhost}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-noreply@localhost}
+      - AUTH_SUBDOMAIN=${AUTH_SUBDOMAIN:-auth}
+      - REGISTRATION_ADMIN_EMAIL=${REGISTRATION_ADMIN_EMAIL:-}
     volumes:
       - ./authelia/configuration.yml:/config/configuration.yml:ro
       - ./secrets/authelia:/secrets:ro       # Authelia's own secrets

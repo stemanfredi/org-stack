@@ -24,7 +24,7 @@ from typing import Optional
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from fastapi.staticfiles import StaticFiles
+
 app = FastAPI(title="User Registration Service")
 templates = Jinja2Templates(directory="templates")
 
@@ -101,27 +101,12 @@ def init_db(db: sqlite3.Connection):
 # =============================================================================
 
 def escape_ldap_dn(value: str) -> str:
-    """
-    Escape special characters for LDAP DN (Distinguished Name)
-    RFC 4514 - Section 2.4 - Special characters that must be escaped in DN:
-    , \ # + < > ; " =
-    """
-    # Escape backslash first to avoid double-escaping
+    """Escape LDAP DN special characters per RFC 4514"""
     value = value.replace('\\', '\\\\')
-    # Escape other special DN characters
-    replacements = {
-        ',': '\\,',
-        '#': '\\#',
-        '+': '\\+',
-        '<': '\\<',
-        '>': '\\>',
-        ';': '\\;',
-        '"': '\\"',
-        '=': '\\=',
-    }
+    replacements = {',': '\\,', '#': '\\#', '+': '\\+', '<': '\\<',
+                    '>': '\\>', ';': '\\;', '"': '\\"', '=': '\\='}
     for char, escaped in replacements.items():
         value = value.replace(char, escaped)
-    # Escape leading and trailing spaces
     if value.startswith(' '):
         value = '\\' + value
     if value.endswith(' '):
@@ -129,19 +114,11 @@ def escape_ldap_dn(value: str) -> str:
     return value
 
 def validate_username_strict(username: str) -> bool:
-    """
-    Strict username validation - defense in depth
-    Only allow: lowercase letters, numbers, underscore
-    No LDAP special characters allowed
-    """
-    if not username:
+    """Validate username: 2-64 chars, lowercase alphanumeric + underscore, must start with letter"""
+    if not username or len(username) < 2 or len(username) > 64:
         return False
-    if len(username) < 2 or len(username) > 64:
-        return False
-    # Must be alphanumeric + underscore, lowercase only
     if not username.replace('_', '').isalnum() or not username.islower():
         return False
-    # Must start with letter
     if not username[0].isalpha():
         return False
     return True
@@ -174,134 +151,123 @@ def get_lldap_admin_password() -> str:
     return os.environ.get('LLDAP_ADMIN_PASSWORD', '')
 
 async def create_lldap_user(username: str, email: str, first_name: str, last_name: str) -> tuple[bool, str, str]:
-    """
-    Create user in lldap via pure LDAP operations
-    Returns: (success: bool, password: str, error: str)
-
-    Security: Validates all inputs and escapes LDAP DN construction
-    Uses ldapadd + ldappasswd (no HTTP/GraphQL dependency)
-    """
+    """Create user in lldap via LDAP. Returns (success, password, error)"""
     try:
-        # SECURITY: Strict validation before LDAP operations (defense in depth)
+        # Validate inputs
         if not validate_username_strict(username):
-            error_msg = 'Invalid username format'
-            print(f'[SECURITY] Username validation failed: {username}')
-            return False, '', error_msg
+            print(f'[SECURITY] Invalid username: {username}')
+            return False, '', 'Invalid username format'
 
         if not validate_email_basic(email):
-            error_msg = 'Invalid email format'
-            print(f'[SECURITY] Email validation failed: {email}')
-            return False, '', error_msg
+            return False, '', 'Invalid email format'
 
-        # Validate name fields (basic length and character check)
         if not first_name or len(first_name) > 100 or not last_name or len(last_name) > 100:
-            error_msg = 'Invalid name fields'
-            print(f'[SECURITY] Name validation failed')
-            return False, '', error_msg
+            return False, '', 'Invalid name fields'
 
-        # Generate random password (20 chars, alphanumeric + punctuation)
+        # Generate random password
         password = ''.join(secrets.choice(
             string.ascii_letters + string.digits + string.punctuation
         ) for _ in range(20))
 
         admin_password = get_lldap_admin_password()
 
-        # SECURITY: Escape LDAP DN components to prevent injection
-        escaped_username = escape_ldap_dn(username)
-        escaped_admin_user = escape_ldap_dn(LLDAP_ADMIN_USER)
-        escaped_first_name = escape_ldap_dn(first_name)
-        escaped_last_name = escape_ldap_dn(last_name)
-        escaped_email = escape_ldap_dn(email)
+        # Escape LDAP DN components
+        user_dn = f'uid={escape_ldap_dn(username)},ou=people,{LLDAP_BASE_DN}'
+        admin_dn = f'uid={escape_ldap_dn(LLDAP_ADMIN_USER)},ou=people,{LLDAP_BASE_DN}'
 
-        user_dn = f'uid={escaped_username},ou=people,{LLDAP_BASE_DN}'
-        admin_dn = f'uid={escaped_admin_user},ou=people,{LLDAP_BASE_DN}'
-
-        # Step 1: Create user entry using ldapadd with LDIF
-        print(f'[DEBUG] Creating user {username} in lldap via LDAP...')
-
-        # Create LDIF content for new user
-        # lldap requires: person, inetOrgPerson, posixAccount, mailAccount objectClasses
+        # Create LDIF for new user
         ldif_content = f'''dn: {user_dn}
 objectClass: person
 objectClass: inetOrgPerson
-uid: {escaped_username}
-cn: {escaped_first_name} {escaped_last_name}
-sn: {escaped_last_name}
-givenName: {escaped_first_name}
-mail: {escaped_email}
+uid: {escape_ldap_dn(username)}
+cn: {escape_ldap_dn(first_name)} {escape_ldap_dn(last_name)}
+sn: {escape_ldap_dn(last_name)}
+givenName: {escape_ldap_dn(first_name)}
+mail: {escape_ldap_dn(email)}
 '''
 
+        # Step 1: Create user with ldapadd
         try:
-            # Use ldapadd to create the user
             result = subprocess.run(
-                [
-                    'ldapadd',
-                    '-H', LDAP_HOST,
-                    '-D', admin_dn,
-                    '-w', admin_password,
-                    '-x'
-                ],
-                input=ldif_content,
-                capture_output=True,
-                text=True,
-                timeout=10
+                ['ldapadd', '-H', LDAP_HOST, '-D', admin_dn, '-w', admin_password, '-x'],
+                input=ldif_content, capture_output=True, text=True, timeout=10
             )
-
             if result.returncode != 0:
-                error_msg = f'ldapadd failed: {result.stderr}'
-                print(f'[ERROR] {error_msg}')
-                return False, '', error_msg
+                print(f'[ERROR] ldapadd failed: {result.stderr}')
+                return False, '', f'Failed to create user: {result.stderr}'
 
-            print(f'[SUCCESS] User {username} created successfully in lldap')
+            print(f'[SUCCESS] User {username} created in lldap')
 
         except subprocess.TimeoutExpired:
-            error_msg = 'ldapadd command timed out'
-            print(f'[ERROR] {error_msg}')
-            return False, '', error_msg
+            return False, '', 'LDAP operation timed out'
         except Exception as e:
-            error_msg = f'ldapadd failed: {str(e)}'
-            print(f'[ERROR] {error_msg}')
-            return False, '', error_msg
+            return False, '', f'Failed to create user: {str(e)}'
 
-        # Step 2: Set password using ldappasswd
-        print(f'[DEBUG] Setting password for user {username} via LDAP...')
+        # Step 2: Set password with ldappasswd
         try:
             result = subprocess.run(
-                [
-                    'ldappasswd',
-                    '-H', LDAP_HOST,
-                    '-D', admin_dn,
-                    '-w', admin_password,
-                    '-s', password,
-                    user_dn
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10
+                ['ldappasswd', '-H', LDAP_HOST, '-D', admin_dn, '-w', admin_password, '-s', password, user_dn],
+                capture_output=True, text=True, timeout=10
             )
-
             if result.returncode != 0:
-                error_msg = f'ldappasswd failed: {result.stderr}'
-                print(f'[ERROR] {error_msg}')
-                # Try to clean up the user entry
+                print(f'[ERROR] ldappasswd failed: {result.stderr}')
+                # Cleanup: delete user entry
                 subprocess.run(['ldapdelete', '-H', LDAP_HOST, '-D', admin_dn, '-w', admin_password, user_dn],
                              capture_output=True, timeout=10)
-                return False, '', error_msg
+                return False, '', f'Failed to set password: {result.stderr}'
 
-            print(f'[SUCCESS] Password set for user {username} via LDAP')
+            print(f'[SUCCESS] Password set for user {username}')
             return True, password, ''
 
         except subprocess.TimeoutExpired:
-            error_msg = 'ldappasswd command timed out'
-            print(f'[ERROR] {error_msg}')
-            return False, '', error_msg
+            return False, '', 'LDAP operation timed out'
         except Exception as e:
-            error_msg = f'ldappasswd failed: {str(e)}'
-            print(f'[ERROR] {error_msg}')
-            return False, '', error_msg
+            return False, '', f'Failed to set password: {str(e)}'
 
     except Exception as e:
         return False, '', str(e)
+
+# =============================================================================
+# LDAP Validation Functions
+# =============================================================================
+
+def check_ldap_user_exists(username: str = None, email: str = None) -> tuple[bool, str]:
+    """
+    Check if username or email already exists in lldap.
+    Returns (exists: bool, error_message: str)
+    """
+    try:
+        admin_password = open('/secrets-lldap/LDAP_USER_PASS').read().strip()
+        admin_dn = f'uid={LLDAP_ADMIN_USER},ou=people,{LLDAP_BASE_DN}'
+
+        # Check username exists
+        if username:
+            result = subprocess.run(
+                ['ldapsearch', '-x', '-LLL', '-H', LDAP_HOST, '-D', admin_dn, '-w', admin_password,
+                 '-b', f'ou=people,{LLDAP_BASE_DN}', f'(uid={escape_ldap_dn(username)})', 'dn'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return True, f'Username "{username}" is already taken'
+
+        # Check email exists
+        if email:
+            result = subprocess.run(
+                ['ldapsearch', '-x', '-LLL', '-H', LDAP_HOST, '-D', admin_dn, '-w', admin_password,
+                 '-b', f'ou=people,{LLDAP_BASE_DN}', f'(mail={escape_ldap_dn(email)})', 'dn'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return True, f'Email "{email}" is already registered'
+
+        return False, ''
+
+    except subprocess.TimeoutExpired:
+        print('[ERROR] LDAP search timed out')
+        return False, ''  # Fail open - allow registration if LDAP is slow
+    except Exception as e:
+        print(f'[ERROR] Failed to check LDAP: {str(e)}')
+        return False, ''  # Fail open - allow registration if LDAP check fails
 
 # =============================================================================
 # Email Notifications
@@ -417,43 +383,65 @@ async def register_submit(
     reason: str = Form(default='')
 ):
     """Handle registration form submission"""
-    # Sanitization
-    username = username.strip().lower()  # Force lowercase
+    username = username.strip().lower()
     email = email.strip().lower()
     first_name = first_name.strip()
     last_name = last_name.strip()
     reason = reason.strip()
 
-    # Required fields check
     if not all([username, email, first_name, last_name]):
         return templates.TemplateResponse(
             'register.html',
             {'request': request, 'error': 'All fields except reason are required'}
         )
 
-    # SECURITY: Strict username validation
     if not validate_username_strict(username):
         return templates.TemplateResponse(
             'register.html',
             {'request': request, 'error': 'Username must be 2-64 characters, start with a letter, and contain only lowercase letters, numbers, and underscores'}
         )
 
-    # SECURITY: Email validation
     if not validate_email_basic(email):
         return templates.TemplateResponse(
             'register.html',
             {'request': request, 'error': 'Invalid email address'}
         )
 
-    # SECURITY: Name length validation
     if len(first_name) > 100 or len(last_name) > 100:
         return templates.TemplateResponse(
             'register.html',
             {'request': request, 'error': 'Names must be less than 100 characters'}
         )
 
-    # Insert into database
+    # Check if username or email already exists in lldap
+    exists, error_msg = check_ldap_user_exists(username=username, email=email)
+    if exists:
+        return templates.TemplateResponse(
+            'register.html',
+            {'request': request, 'error': error_msg}
+        )
+
+    # Check for pending registration and insert in single transaction
     with get_db() as db:
+        # Check if username or email already has a pending request
+        existing = db.execute(
+            'SELECT username, email FROM registration_requests WHERE username = ? OR email = ?',
+            (username, email)
+        ).fetchone()
+
+        if existing:
+            if existing[0] == username:
+                return templates.TemplateResponse(
+                    'register.html',
+                    {'request': request, 'error': f'Username "{username}" already has a pending registration request'}
+                )
+            else:
+                return templates.TemplateResponse(
+                    'register.html',
+                    {'request': request, 'error': f'Email "{email}" already has a pending registration request'}
+                )
+
+        # Insert new registration request
         try:
             db.execute(
                 '''INSERT INTO registration_requests
@@ -481,10 +469,7 @@ async def register_submit(
 
 @app.get('/admin', response_class=HTMLResponse)
 async def admin_dashboard(request: Request):
-    """
-    Admin dashboard - shows pending requests and audit log
-    Protected by Authelia forward-auth at proxy level
-    """
+    """Admin dashboard for reviewing registration requests"""
     admin_user = request.headers.get('Remote-User', 'unknown')
 
     with get_db() as db:
@@ -585,13 +570,3 @@ async def reject_request(request_id: int, request: Request, reason: str = Form(d
 async def health():
     """Health check endpoint"""
     return {'status': 'healthy'}
-
-@app.get('/debug/requests')
-async def debug_requests():
-    """Debug endpoint to check all registration requests"""
-    with get_db() as db:
-        all_requests = db.execute('SELECT * FROM registration_requests ORDER BY created_at DESC').fetchall()
-        return {
-            'total': len(all_requests),
-            'requests': [dict(row) for row in all_requests]
-        }
