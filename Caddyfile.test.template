@@ -55,14 +55,15 @@ ${LLDAP_SUBDOMAIN}.${BASE_DOMAIN} {
 ${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN} {
     tls internal
 
-    # Admin dashboard requires authentication
-    route /admin* {
+    # Admin dashboard requires authentication and admin group membership
+    @admin path /admin*
+    handle @admin {
         import auth
         reverse_proxy registration:5000
     }
 
     # Public registration form (no auth required)
-    route {
+    handle {
         reverse_proxy registration:5000
     }
 }
