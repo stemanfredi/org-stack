@@ -44,13 +44,11 @@ access_control:
         - ['group:lldap_admin']
     - domain: ${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN}
       resources:
-        - '^/admin.*'
+        - '^/admin(/.*)?$'
       policy: ${AUTH_POLICY}
       subject:
         - ['group:lldap_admin']
     - domain: ${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN}
-      resources:
-        - '^/(?!admin).*'
       policy: bypass
     - domain: ${AUTHELIA_SUBDOMAIN}.${BASE_DOMAIN}
       policy: bypass
