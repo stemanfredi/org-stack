@@ -42,6 +42,21 @@ if [ -z "$BASE_DOMAIN" ] || [ -z "$REMOTE_USER" ] || [ -z "$REMOTE_HOST" ]; then
     error "Required variables missing in .env: BASE_DOMAIN, REMOTE_USER, REMOTE_HOST"
 fi
 
+# Handle REMOTE_PATH (supports both absolute and relative paths)
+if [ -z "$REMOTE_PATH" ]; then
+    # Backwards compatibility: use old REMOTE_DIR if REMOTE_PATH not set
+    REMOTE_PATH="${REMOTE_DIR:-org-stack}"
+fi
+
+# Determine if path is absolute or relative
+if [[ "$REMOTE_PATH" = /* ]]; then
+    DEPLOY_PATH="$REMOTE_PATH"
+    log "Deploying to absolute path: $DEPLOY_PATH"
+else
+    DEPLOY_PATH="~/$REMOTE_PATH"
+    log "Deploying to path relative to home: $DEPLOY_PATH"
+fi
+
 success "Configuration validated"
 
 #=============================================================================
@@ -49,8 +64,8 @@ success "Configuration validated"
 #=============================================================================
 log "Syncing files to remote server ${REMOTE_USER}@${REMOTE_HOST}..."
 
-# Create remote directory
-ssh -p ${REMOTE_PORT:-22} ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p ~/${REMOTE_DIR:-org-stack}" || \
+# Create remote directory with proper permissions
+ssh -p ${REMOTE_PORT:-22} ${REMOTE_USER}@${REMOTE_HOST} "mkdir -p $DEPLOY_PATH" || \
     error "Failed to create remote directory"
 
 # Sync all necessary files (excluding secrets - they'll be generated remotely)
@@ -59,7 +74,8 @@ rsync -avz --delete \
     --exclude='.git/' \
     --exclude='*.tar.gz' \
     --exclude='backups/' \
-    ./ ${REMOTE_USER}@${REMOTE_HOST}:~/${REMOTE_DIR:-org-stack}/ || \
+    --exclude='data/' \
+    ./ ${REMOTE_USER}@${REMOTE_HOST}:${DEPLOY_PATH}/ || \
     error "Failed to sync files"
 
 success "Files synced to remote server"
@@ -69,7 +85,9 @@ success "Files synced to remote server"
 #=============================================================================
 log "Running deployment on remote server..."
 
-ssh -p ${REMOTE_PORT:-22} ${REMOTE_USER}@${REMOTE_HOST} "bash -s" <<'REMOTE_SCRIPT'
+# Export variables for remote script
+ssh -p ${REMOTE_PORT:-22} ${REMOTE_USER}@${REMOTE_HOST} \
+    "export DEPLOY_PATH='${DEPLOY_PATH}' ADMIN_GROUP='${ADMIN_GROUP}'; bash -s" <<'REMOTE_SCRIPT'
 
 set -e
 
@@ -84,7 +102,8 @@ log() { echo -e "${BLUE}➜${NC} $1"; }
 success() { echo -e "${GREEN}✓${NC} $1"; }
 error() { echo -e "${RED}✗${NC} $1"; exit 1; }
 
-cd ~/org-stack
+# Change to deployment directory (expand tilde if present)
+eval cd "$DEPLOY_PATH"
 
 # Source environment
 set -a
@@ -159,6 +178,45 @@ if [ ! -f "secrets/authelia/OIDC_PRIVATE_KEY" ]; then
 fi
 
 success "All secrets ready"
+
+#=============================================================================
+# Set up permissions for multi-admin access
+#=============================================================================
+if [ -n "$ADMIN_GROUP" ]; then
+    log "Configuring multi-admin permissions for group: $ADMIN_GROUP"
+
+    # Verify group exists
+    if ! getent group "$ADMIN_GROUP" >/dev/null 2>&1; then
+        error "Group '$ADMIN_GROUP' does not exist. Create it with: sudo groupadd $ADMIN_GROUP"
+    fi
+
+    # Set group ownership on all files (preserve user owner)
+    chgrp -R "$ADMIN_GROUP" . 2>/dev/null || \
+        error "Failed to set group ownership. Ensure user is in group: sudo usermod -aG $ADMIN_GROUP $USER"
+
+    # Set permissions:
+    # - Directories: 750 (rwxr-x---) - owner full, group read+execute, others none
+    # - Regular files: 640 (rw-r-----) - owner read+write, group read, others none
+    # - Secrets: 600 (rw-------) - owner only (Docker will read as owner)
+    # - Executables: 750 (rwxr-x---) - owner execute, group execute
+
+    find . -type d -exec chmod 750 {} \;
+    find . -type f -exec chmod 640 {} \;
+    find . -type f -name '*.sh' -exec chmod 750 {} \;
+    chmod 750 manage.sh deploy.sh 2>/dev/null || true
+
+    # Secrets should be more restrictive (owner only)
+    if [ -d "secrets" ]; then
+        chmod 750 secrets
+        find secrets -type d -exec chmod 750 {} \;
+        find secrets -type f -exec chmod 600 {} \;
+    fi
+
+    success "Permissions configured for multi-admin access"
+    log "Group members can read configs and manage with: cd $DEPLOY_PATH && ./manage.sh"
+else
+    log "Single-user mode (ADMIN_GROUP not set)"
+fi
 
 #=============================================================================
 # Derive LDAP_BASE_DN

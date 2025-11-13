@@ -34,6 +34,8 @@ This project provides a complete, production-ready stack for small to medium org
 
 ### Installation
 
+> **Note**: For production deployments with multiple administrators, see [MULTI_ADMIN_SETUP.md](MULTI_ADMIN_SETUP.md) for system-wide installation with proper permissions.
+
 1. **Clone the repository**
    ```bash
    git clone https://github.com/yourorg/org-stack.git
@@ -48,8 +50,9 @@ This project provides a complete, production-ready stack for small to medium org
 
    Required changes in `.env`:
    - `BASE_DOMAIN=example.com` → your actual domain
-   - `REMOTE_USER=user` → your SSH username
+   - `REMOTE_USER=user` → your SSH username (or `deploy` for multi-admin)
    - `REMOTE_HOST=example.com` → your server hostname/IP
+   - `REMOTE_PATH=/opt/org-stack` → optional, for system-wide installation
 
 3. **Deploy**
    ```bash

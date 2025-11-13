@@ -11,10 +11,27 @@ if [ -f .env ]; then
     set +a
 fi
 
+# Determine deployment path
+get_deploy_path() {
+    # Handle REMOTE_PATH (supports both absolute and relative paths)
+    if [ -z "$REMOTE_PATH" ]; then
+        # Backwards compatibility: use old REMOTE_DIR if REMOTE_PATH not set
+        REMOTE_PATH="${REMOTE_DIR:-org-stack}"
+    fi
+
+    # Determine if path is absolute or relative
+    if [[ "$REMOTE_PATH" = /* ]]; then
+        echo "$REMOTE_PATH"
+    else
+        echo "~/$REMOTE_PATH"
+    fi
+}
+
 # Remote execution wrapper
 remote_exec() {
     if [ -n "$REMOTE_HOST" ] && [ -n "$REMOTE_USER" ]; then
-        ssh -p ${REMOTE_PORT:-22} ${REMOTE_USER}@${REMOTE_HOST} "cd ~/${REMOTE_DIR:-org-stack} && $1"
+        local deploy_path=$(get_deploy_path)
+        ssh -p ${REMOTE_PORT:-22} ${REMOTE_USER}@${REMOTE_HOST} "cd $deploy_path && $1"
     else
         eval "$1"
     fi
