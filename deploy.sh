@@ -149,6 +149,7 @@ generate_secret_file "secrets/authelia/JWT_SECRET" 32
 generate_secret_file "secrets/authelia/SESSION_SECRET" 32
 generate_secret_file "secrets/authelia/STORAGE_ENCRYPTION_KEY" 32
 generate_secret_file "secrets/authelia/OIDC_HMAC_SECRET" 32
+generate_secret_file "secrets/authelia/RESET_PASSWORD_JWT_SECRET" 32
 
 # Generate Gitea OIDC secret in .env if missing
 if ! grep -q "^GITEA_OIDC_CLIENT_SECRET=" .env || [ -z "$GITEA_OIDC_CLIENT_SECRET" ]; then
