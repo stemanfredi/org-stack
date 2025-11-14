@@ -92,7 +92,8 @@ services:
       - GITEA__server__SSH_DOMAIN=${GITEA_SUBDOMAIN}.${BASE_DOMAIN}
       - GITEA__server__SSH_PORT=${GITEA_SSH_PORT:-2222}
       - GITEA__oauth2_client__ACCOUNT_LINKING=auto
-      - GITEA__oauth2_client__ENABLE_AUTO_REGISTRATION=true
+      - GITEA__oauth2_client__ENABLE_AUTO_REGISTRATION=false
+      - GITEA__oauth2_client__UPDATE_AVATAR=true
       - GITEA__openid__ENABLE_OPENID_SIGNIN=false
       # Trust Caddy's self-signed CA when USE_SELF_SIGNED_CERTS=true
       - SSL_CERT_FILE=/data/ca-bundle.crt

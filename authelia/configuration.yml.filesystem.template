@@ -48,8 +48,6 @@ access_control:
       policy: ${AUTH_POLICY}
       subject:
         - ['group:lldap_admin']
-    - domain: ${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN}
-      policy: bypass
     - domain: ${AUTHELIA_SUBDOMAIN}.${BASE_DOMAIN}
       policy: bypass
 
@@ -99,14 +97,6 @@ identity_providers:
         - revocation
         - introspection
       allowed_origins_from_client_redirect_uris: true
-    # Include username and email in ID token for Gitea auto-provisioning
-    claims_policies:
-      gitea:
-        id_token:
-          - email
-          - email_verified
-          - preferred_username
-          - name
     clients:
       - client_id: gitea
         client_name: Gitea
@@ -122,4 +112,3 @@ identity_providers:
           - groups
         userinfo_signed_response_alg: none
         token_endpoint_auth_method: client_secret_basic
-        claims_policy: gitea

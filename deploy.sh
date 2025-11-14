@@ -306,7 +306,7 @@ echo
 echo "Services available at:"
 echo "  • Gitea:        https://${GITEA_SUBDOMAIN}.${BASE_DOMAIN}"
 echo "  • Wiki:         https://${WIKI_SUBDOMAIN}.${BASE_DOMAIN}"
-echo "  • Authelia:     https://${AUTH_SUBDOMAIN}.${BASE_DOMAIN}"
+echo "  • Authelia:     https://${AUTHELIA_SUBDOMAIN}.${BASE_DOMAIN}"
 echo "  • lldap:        https://${LLDAP_SUBDOMAIN}.${BASE_DOMAIN}"
 echo "  • Registration: https://${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN}"
 echo

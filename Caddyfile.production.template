@@ -50,13 +50,13 @@ ${LLDAP_SUBDOMAIN}.${BASE_DOMAIN} {
 # Registration - Public form, protected admin dashboard
 ${REGISTRATION_SUBDOMAIN}.${BASE_DOMAIN} {
     # Admin dashboard requires authentication and admin group membership
-    @admin path /admin*
+    @admin path /admin /admin/*
     handle @admin {
         import auth
         reverse_proxy registration:5000
     }
 
-    # Public registration form (no auth required)
+    # Public registration form (no auth required - skip forward_auth)
     handle {
         reverse_proxy registration:5000
     }
